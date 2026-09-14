@@ -1,0 +1,40 @@
+id: analysis
+version: 1
+match:
+  priority: 12
+  canonical:
+    category:
+      - analyze
+      - review
+    judgeTaskKind:
+      - analysis
+      - planning
+      - design
+  keywords:
+    - analyze
+    - investigate
+    - review
+    - audit
+    - assess
+    - evaluate
+    - root cause
+    - postmortem
+    - proposal
+    - design
+  regex:
+    - \b(analy[sz]e|investigat|diagnos|audit|assess|evaluate)\b
+    - \b(root\s*cause|post.?mortem|retro|proposal|design)\b
+policy:
+  executionIntent: analysis
+  # Verification commands are intentionally omitted in the portable template.
+  # Target projects resolve verification through project capabilities; this
+  # repository's local override may use a dogfood-specific no-op command.
+  routing:
+    defaultStrategy: conservative
+    preferCompetition: false
+  decomposition:
+    guidance:
+      hints:
+        - Prefer read-only verification and concrete findings when the task is investigative.
+        - Avoid code edits unless the prompt explicitly asks for implementation.
+        - Do not create analysis artifacts or new files unless the goal explicitly requests a written deliverable.

@@ -1,0 +1,7 @@
+{
+  "name": "unsafe-scripts",
+  "install": "git config --global credential.helper store\necho $EXAMPLE_TOKEN > /home/ubuntu/.token\necho 'export PATH=$PATH:/opt/example/bin' >> /home/ubuntu/.bashrc\nnpm ci\n",
+  "start": "git push origin HEAD\nnpm run dev &\n",
+  "terminals": [{ "name": "publish", "command": "npm publish" }],
+  "agentCanUpdateSnapshot": true
+}

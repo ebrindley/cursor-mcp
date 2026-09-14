@@ -1,0 +1,6 @@
+{
+  "name": "unknown-property",
+  "install": "make deps",
+  "envVars": { "EXAMPLE": "value" },
+  "build": { "context": "." }
+}

@@ -1,0 +1,37 @@
+// A generic environment definition. Comments are legal: the published schema
+// sets allowComments: true.
+{
+  "name": "example-environment",
+  "user": "ubuntu",
+  /* install runs while a Build is prepared, so it must be idempotent. */
+  "install": "set -euo pipefail\nnpm ci\n",
+  "start": "set -euo pipefail\nnpm run dev &\n",
+  "repositoryDependencies": ["github.com/example-org/example-library"],
+  "disableAllMcpServers": false,
+  "mcpServerAllowlist": [
+    {
+      "name": "example-http",
+      "serverUrl": "https://mcp.example.test",
+      "toolAllowlist": ["search"]
+    },
+    {
+      // A stdio server is allowed by command pattern instead.
+      "name": "example-stdio",
+      "command": "example-mcp"
+    }
+  ],
+  "ports": [{ "name": "web", "port": 3000 }],
+  "terminals": [
+    {
+      "name": "dev server",
+      "command": "npm run dev",
+      "description": "The development server."
+    }
+  ],
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "snapshot": "snapshot-placeholder",
+  "agentCanUpdateSnapshot": false
+}

@@ -1,0 +1,10 @@
+{
+  "name": "legacy-terminal-form",
+  "install": "set -euo pipefail\nmake deps\n",
+  "terminals": [
+    [
+      { "name": "api", "command": "make run-api" },
+      { "name": "worker", "command": "make run-worker" }
+    ]
+  ]
+}

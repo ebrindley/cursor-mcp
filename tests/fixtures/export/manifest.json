@@ -1,0 +1,72 @@
+{
+  "note": "Entirely synthetic payloads and tool mixes. Expected counts are the generator plan, independently checked against parsed exports.",
+  "builtBy": "tests/fixtures/export/build.mjs",
+  "fixtures": {
+    "synthetic-complete.sse": {
+      "bytes": 22643,
+      "events": 88,
+      "byType": {
+        "status": 2,
+        "thinking": 6,
+        "assistant": 5,
+        "interaction_update": 18,
+        "tool_call": 55,
+        "result": 1,
+        "done": 1
+      },
+      "toolCallEvents": 55,
+      "unparsedToolCalls": 1,
+      "calls": 18,
+      "completed": 18,
+      "running": 0,
+      "runningCalls": [],
+      "byName": {
+        "run_terminal_cmd": 8,
+        "read_file": 4,
+        "grep_search": 2,
+        "await": 1,
+        "get_mcp_tools": 1,
+        "file_search": 1,
+        "edit_file": 1
+      },
+      "terminalCommands": 8
+    },
+    "synthetic-incomplete.sse": {
+      "bytes": 31145,
+      "events": 129,
+      "byType": {
+        "status": 2,
+        "thinking": 10,
+        "assistant": 7,
+        "interaction_update": 28,
+        "tool_call": 80,
+        "result": 1,
+        "done": 1
+      },
+      "toolCallEvents": 80,
+      "unparsedToolCalls": 1,
+      "calls": 28,
+      "completed": 24,
+      "running": 4,
+      "runningCalls": [
+        "call-0025",
+        "call-0026",
+        "call-0027",
+        "call-0028"
+      ],
+      "byName": {
+        "run_terminal_cmd": 9,
+        "read_file": 7,
+        "grep_search": 3,
+        "await": 3,
+        "edit_file": 2,
+        "get_mcp_tools": 1,
+        "file_search": 1,
+        "pr_management": 1,
+        "mcp": 1
+      },
+      "terminalCommands": 9,
+      "seededFakeSecret": "FAKE-NOT-A-REAL-CREDENTIAL-eyJhbGciOiJub25lIn0"
+    }
+  }
+}

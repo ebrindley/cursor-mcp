@@ -1,0 +1,38 @@
+id: architecture
+version: 1
+extends: general
+match:
+  priority: 18
+  keywords:
+    - architecture
+    - architectural
+    - rearchitect
+    - plugin architecture
+    - plugin boundary
+    - orchestration layer
+    - provider execution
+    - provider adapters
+    - core execution model
+    - api boundary
+  regex:
+    - \b(redesign|rearchitect|abstraction\s+layer|plugin\s+boundary|core\s+execution\s+model)\b
+    - \b(define|design)\b.{0,40}\b(contract|interface|api\s+boundary|plugin\s+system|orchestration\s+layer)\b
+    - \b(plugin\s+architecture|provider\s+execution|execution\s+orchestration)\b
+    - \b(refactor|restructure)\b.{0,40}\b(core|execution|pipeline|orchestration)\b.{0,40}\b(model|layer|architecture|boundary)\b
+policy:
+  executionIntent: edit
+  routing:
+    defaultStrategy: hybrid
+    preferCompetition: true
+  decomposition:
+    requiredStageTypes:
+      - verify
+    guidance:
+      hints:
+        - "Architectural stages should define clear contracts and interfaces before implementation"
+        - "Prefer competition for core design decisions with multiple valid approaches"
+      antiPatterns:
+        - "Do not over-architect simple feature additions"
+        - "Avoid creating new abstraction layers without clear justification"
+  allowlist:
+    requireNonEmpty: true

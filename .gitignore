@@ -1,0 +1,28 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+.env
+.env.*
+policy.json
+
+# Local runtime and maintainer workspace state
+.mcp-runtime/
+.claude/
+
+# Poetic work-item archives stay local; active items are tracked.
+backlog/archive/
+task/archive/
+sprint/archive/
+tech-debt/archive/
+parking-lot/archive/
+finding/archive/
+issue/archive/
+suppression/archive/
+
+# Shared Poetic configuration and active work items stay tracked.
+!.poetic/
+.poetic/backlog/archive/
+.poetic/task/archive/
+.poetic/sprint/archive/

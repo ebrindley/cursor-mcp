@@ -1,0 +1,519 @@
+event: status
+data: {"runId":"run-export-1","status":"RUNNING"}
+
+id: 1757000000000-0
+event: thinking
+data: {"text":"considering example 0"}
+
+id: 1757000000000-0
+event: assistant
+data: {"text":"Working on example 0."}
+
+id: 1757000000000-1
+event: interaction_update
+data: {"stepId":0,"callId":"call-0001","modelCallId":"model-0","text":"example 0","tokens":12,"stepDurationMs":40,"toolCall":{"args":{"command":"printf '%s' \"$TOKEN\" # FAKE-NOT-A-REAL-CREDENTIAL-eyJhbGciOiJub25lIn0","description":"run example 0","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]}}}
+
+id: 1757000000000-1
+event: tool_call
+data: {"callId":"call-0001","name":"run_terminal_cmd","status":"running","args":{"command":"printf '%s' \"$TOKEN\" # FAKE-NOT-A-REAL-CREDENTIAL-eyJhbGciOiJub25lIn0","description":"run example 0","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-2
+event: tool_call
+data: {"callId":"call-0001","name":"run_terminal_cmd","status":"completed","args":{"command":"printf '%s' \"$TOKEN\" # FAKE-NOT-A-REAL-CREDENTIAL-eyJhbGciOiJub25lIn0","description":"run example 0","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"result":{"isBackground":false,"success":{"command":"npm test -- tests/example-0.test.ts","executionTime":1200,"localExecutionTimeMs":1190,"interleavedOutput":"example 0: 4 passed\n","stdout":"example 0: 4 passed\n","stderr":"example 0: 1 warning\n"}},"truncated":false}
+
+id: 1757000000000-2
+event: interaction_update
+data: {"stepId":1,"callId":"call-0002","modelCallId":"model-1","text":"example 1","tokens":13,"stepDurationMs":41,"toolCall":{"args":{"path":"src/example-1.ts","offset":0,"headLimit":200}}}
+
+: keepalive
+
+id: 1757000000000-3
+event: tool_call
+data: {"callId":"call-0002","name":"read_file","status":"running","args":{"path":"src/example-1.ts","offset":0,"headLimit":200},"truncated":false}
+
+id: 1757000000000-3
+event: tool_call
+data: {"callId":"call-0002","name":"read_file","status":"running","args":{"path":"src/example-1.ts","offset":0,"headLimit":200},"truncated":false}
+
+id: 1757000000000-4
+event: tool_call
+data: {"callId":"call-0002","name":"read_file","status":"completed","args":{"path":"src/example-1.ts","offset":0,"headLimit":200},"result":{"isBackground":false,"success":{"path":"src/example-1.ts","content":"export const example1 = 1;\n","fileSize":33,"totalLines":1,"readRange":{"start":1,"end":1}}},"truncated":false}
+
+id: 1757000000000-4
+event: interaction_update
+data: {"stepId":2,"callId":"call-0003","modelCallId":"model-2","text":"example 2","tokens":14,"stepDurationMs":42,"toolCall":{"args":{"pattern":"example-2","targetDirectory":"/agent/repos/example","multiline":false}}}
+
+id: 1757000000000-5
+event: heartbeat
+
+id: 1757000000000-5
+event: tool_call
+data: {"callId":"call-0003","name":"grep_search","status":"running","args":{"pattern":"example-2","targetDirectory":"/agent/repos/example","multiline":false},"truncated":false}
+
+id: 1757000000000-6
+event: tool_call
+data: {"callId":"call-0003","name":"grep_search","status":"running","args":{"pattern":"example-2","targetDirectory":"/agent/repos/example","multiline":false},"truncated":false}
+
+id: 1757000000000-6
+event: tool_call
+data: {"callId":"call-0003","name":"grep_search","status":"running","args":{"pattern":"example-2","targetDirectory":"/agent/repos/example","multiline":false},"truncated":false}
+
+id: 1757000000000-7
+event: tool_call
+data: {"callId":"call-0003","name":"grep_search","status":"completed","args":{"pattern":"example-2","targetDirectory":"/agent/repos/example","multiline":false},"result":{"isBackground":false,"success":{"outputMode":"files_with_matches","path":"/agent/repos/example","pattern":"example-2","workspaceResults":{"/agent/repos/example":{"type":"matches","output":{"matches":[{"file":"src/example-2.ts"}],"totalMatches":1}}}}},"truncated":false}
+
+id: 1757000000000-7
+event: thinking
+data: {"text":"considering example 3"}
+
+id: 1757000000000-8
+event: interaction_update
+data: {"stepId":3,"callId":"call-0004","modelCallId":"model-3","text":"example 3","tokens":15,"stepDurationMs":43,"toolCall":{"args":{"blockUntilMs":1000,"taskId":"task-3"}}}
+
+id: 1757000000000-8
+event: tool_call
+data: {"callId":"call-0004","name":"await","status":"running","args":{"blockUntilMs":1000,"taskId":"task-3"},"truncated":false}
+
+id: 1757000000000-9
+event: tool_call
+data: {"callId":"call-0004","name":"await","status":"completed","args":{"blockUntilMs":1000,"taskId":"task-3"},"result":{"isBackground":false,"success":{"complete":true}},"truncated":false}
+
+id: 1757000000000-9
+event: assistant
+data: {"text":"Working on example 4."}
+
+id: 1757000000000-10
+event: interaction_update
+data: {"stepId":4,"callId":"call-0005","modelCallId":"model-4","text":"example 4","tokens":16,"stepDurationMs":44,"toolCall":{"args":{"path":"src/example-4.ts"}}}
+
+id: 1757000000000-10
+event: tool_call
+data: {"callId":"call-0005","name":"edit_file","status":"running","args":{"path":"src/example-4.ts"},"truncated":false}
+
+id: 1757000000000-11
+event: tool_call
+data: {"callId":"call-0005","name":"edit_file","status":"running","args":{"path":"src/example-4.ts"},"truncated":false}
+
+id: 1757000000000-11
+event: tool_call
+data: {"callId":"call-0005","name":"edit_file","status":"completed","args":{"path":"src/example-4.ts"},"result":{"isBackground":false,"success":{"path":"src/example-4.ts","message":"edited","diffString":"@@ -1 +1 @@\n-old 4\n+new 4\n","linesAdded":1,"linesRemoved":1}},"truncated":false}
+
+id: 1757000000000-12
+event: interaction_update
+data: {"stepId":5,"callId":"call-0006","modelCallId":"model-5","text":"example 5","tokens":17,"stepDurationMs":45,"toolCall":{"args":{"server":"example","requestId":"req-5"}}}
+
+id: 1757000000000-12
+event: tool_call
+data: {"callId":"call-0006","name":"get_mcp_tools","status":"running","args":{"server":"example","requestId":"req-5"},"truncated":false}
+
+id: 1757000000000-13
+event: tool_call
+data: {"callId":"call-0006","name":"get_mcp_tools","status":"running","args":{"server":"example","requestId":"req-5"},"truncated":false}
+
+id: 1757000000000-13
+event: tool_call
+data: {"callId":"call-0006","name":"get_mcp_tools","status":"running","args":{"server":"example","requestId":"req-5"},"truncated":false}
+
+id: 1757000000000-14
+event: tool_call
+data: {"callId":"call-0006","name":"get_mcp_tools","status":"completed","args":{"server":"example","requestId":"req-5"},"result":{"error":{"message":"example 5 failed","command":"false # 5"}},"truncated":false}
+
+id: 1757000000000-14
+event: thinking
+data: {"text":"considering example 6"}
+
+id: 1757000000000-15
+event: interaction_update
+data: {"stepId":6,"callId":"call-0007","modelCallId":"model-6","text":"example 6","tokens":18,"stepDurationMs":46,"toolCall":{"args":{"globPattern":"**/example-6.ts"}}}
+
+id: 1757000000000-15
+event: tool_call
+data: {"callId":"call-0007","name":"file_search","status":"running","args":{"globPattern":"**/example-6.ts"},"truncated":false}
+
+id: 1757000000000-16
+event: tool_call
+data: {"callId":"call-0007","name":"file_search","status":"completed","args":{"globPattern":"**/example-6.ts"},"result":{"isBackground":false,"success":{"path":"src/example-6.ts","files":["src/example-6.ts"],"totalFiles":1}},"truncated":false}
+
+id: 1757000000000-16
+event: interaction_update
+data: {"stepId":7,"callId":"call-0008","modelCallId":"model-7","text":"example 7","tokens":19,"stepDurationMs":47,"toolCall":{"args":{"toolName":"create_pr","args":{"owner":"ExampleOrg","repo":"ExampleRepo","draft":true}}}}
+
+id: 1757000000000-17
+event: tool_call
+data: {"callId":"call-0008","name":"pr_management","status":"running","args":{"toolName":"create_pr","args":{"owner":"ExampleOrg","repo":"ExampleRepo","draft":true}},"truncated":false}
+
+id: 1757000000000-17
+event: tool_call
+data: {"callId":"call-0008","name":"pr_management","status":"running","args":{"toolName":"create_pr","args":{"owner":"ExampleOrg","repo":"ExampleRepo","draft":true}},"truncated":false}
+
+id: 1757000000000-18
+event: tool_call
+data: {"callId":"call-0008","name":"pr_management","status":"completed","args":{"toolName":"create_pr","args":{"owner":"ExampleOrg","repo":"ExampleRepo","draft":true}},"result":{"timeout":{"afterMs":120000}},"truncated":false}
+
+id: 1757000000000-18
+event: assistant
+data: {"text":"Working on example 8."}
+
+id: 1757000000000-19
+event: interaction_update
+data: {"stepId":8,"callId":"call-0009","modelCallId":"model-8","text":"example 8","tokens":20,"stepDurationMs":48,"toolCall":{"args":{"toolName":"example_tool","providerIdentifier":"example","args":{"limit":1}}}}
+
+id: 1757000000000-19
+event: tool_call
+data: {"callId":"call-0009","name":"mcp","status":"running","args":{"toolName":"example_tool","providerIdentifier":"example","args":{"limit":1}},"truncated":false}
+
+id: 1757000000000-20
+event: tool_call
+data: {"callId":"call-0009","name":"mcp","status":"running","args":{"toolName":"example_tool","providerIdentifier":"example","args":{"limit":1}},"truncated":false}
+
+id: 1757000000000-20
+event: tool_call
+data: {"callId":"call-0009","name":"mcp","status":"running","args":{"toolName":"example_tool","providerIdentifier":"example","args":{"limit":1}},"truncated":false}
+
+id: 1757000000000-21
+event: tool_call
+data: {"callId":"call-0009","name":"mcp","status":"completed","args":{"toolName":"example_tool","providerIdentifier":"example","args":{"limit":1}},"result":{"isBackground":false,"success":{"content":[{"text":{"text":"example mcp result 8"}}],"isError":false}},"truncated":false}
+
+id: 1757000000000-21
+event: thinking
+data: {"text":"considering example 9"}
+
+id: 1757000000000-22
+event: interaction_update
+data: {"stepId":9,"callId":"call-0010","modelCallId":"model-9","text":"example 9","tokens":21,"stepDurationMs":49,"toolCall":{"args":{"command":"npm test -- tests/example-9.test.ts","description":"run example 9","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]}}}
+
+id: 1757000000000-22
+event: tool_call
+data: {"callId":"call-0010","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-9.test.ts","description":"run example 9","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-23
+event: tool_call
+data: {"callId":"call-0010","name":"run_terminal_cmd","status":"completed","args":{"command":"npm test -- tests/example-9.test.ts","description":"run example 9","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"result":{"isBackground":false,"success":{"command":"npm test -- tests/example-9.test.ts","executionTime":1209,"localExecutionTimeMs":1199,"interleavedOutput":"example 9: 4 passed\n","stdout":"example 9: 4 passed\n"}},"truncated":false}
+
+id: 1757000000000-23
+event: interaction_update
+data: {"stepId":10,"callId":"call-0011","modelCallId":"model-10","text":"example 10","tokens":22,"stepDurationMs":50,"toolCall":{"args":{"path":"src/example-10.ts","offset":0,"headLimit":200}}}
+
+id: 1757000000000-24
+event: tool_call
+data: {"callId":"call-0011","name":"read_file","status":"running","args":{"path":"src/example-10.ts","offset":0,"headLimit":200},"truncated":false}
+
+id: 1757000000000-24
+event: tool_call
+data: {"callId":"call-0011","name":"read_file","status":"running","args":{"path":"src/example-10.ts","offset":0,"headLimit":200},"truncated":false}
+
+id: 1757000000000-25
+event: tool_call
+data: {"callId":"call-0011","name":"read_file","status":"completed","args":{"path":"src/example-10.ts","offset":0,"headLimit":200},"result":{"isBackground":false,"success":{"path":"src/example-10.ts","content":"export const example10 = 10;\n","fileSize":42,"totalLines":1,"readRange":{"start":1,"end":1}}},"truncated":false}
+
+id: 1757000000000-25
+event: interaction_update
+data: {"stepId":11,"callId":"call-0012","modelCallId":"model-11","text":"example 11","tokens":23,"stepDurationMs":51,"toolCall":{"args":{"pattern":"example-11","targetDirectory":"/agent/repos/example","multiline":false}}}
+
+id: 1757000000000-26
+event: tool_call
+data: {"callId":"call-0012","name":"grep_search","status":"running","args":{"pattern":"example-11","targetDirectory":"/agent/repos/example","multiline":false},"truncated":false}
+
+id: 1757000000000-26
+event: tool_call
+data: {"callId":"call-0012","name":"grep_search","status":"running","args":{"pattern":"example-11","targetDirectory":"/agent/repos/example","multiline":false},"truncated":false}
+
+id: 1757000000000-27
+event: tool_call
+data: {"callId":"call-0012","name":"grep_search","status":"running","args":{"pattern":"example-11","targetDirectory":"/agent/repos/example","multiline":false},"truncated":false}
+
+id: 1757000000000-27
+event: tool_call
+data: {"callId":"call-0012","name":"grep_search","status":"completed","args":{"pattern":"example-11","targetDirectory":"/agent/repos/example","multiline":false},"result":{"isBackground":false,"success":{"outputMode":"files_with_matches","path":"/agent/repos/example","pattern":"example-11","workspaceResults":{"/agent/repos/example":{"type":"matches","output":{"matches":[{"file":"src/example-11.ts"}],"totalMatches":1}}}}},"truncated":false}
+
+id: 1757000000000-28
+event: thinking
+data: {"text":"considering example 12"}
+
+id: 1757000000000-28
+event: assistant
+data: {"text":"Working on example 12."}
+
+id: 1757000000000-29
+event: interaction_update
+data: {"stepId":12,"callId":"call-0013","modelCallId":"model-12","text":"example 12","tokens":24,"stepDurationMs":52,"toolCall":{"args":{"blockUntilMs":1000,"taskId":"task-12"}}}
+
+id: 1757000000000-29
+event: tool_call
+data: {"callId":"call-0013","name":"await","status":"running","args":{"blockUntilMs":1000,"taskId":"task-12"},"truncated":false}
+
+id: 1757000000000-30
+event: tool_call
+data: {"callId":"call-0013","name":"await","status":"completed","args":{"blockUntilMs":1000,"taskId":"task-12"},"result":{"isBackground":false,"success":{"complete":true}},"truncated":false}
+
+id: 1757000000000-30
+event: interaction_update
+data: {"stepId":13,"callId":"call-0014","modelCallId":"model-13","text":"example 13","tokens":25,"stepDurationMs":53,"toolCall":{"args":{"path":"src/example-13.ts"}}}
+
+id: 1757000000000-31
+event: tool_call
+data: {"callId":"call-0014","name":"edit_file","status":"running","args":{"path":"src/example-13.ts"},"truncated":false}
+
+id: 1757000000000-31
+event: tool_call
+data: {"callId":"call-0014","name":"edit_file","status":"running","args":{"path":"src/example-13.ts"},"truncated":false}
+
+id: 1757000000000-32
+event: tool_call
+data: {"callId":"call-0014","name":"edit_file","status":"completed","args":{"path":"src/example-13.ts"},"result":{"isBackground":false,"success":{"path":"src/example-13.ts","message":"edited","diffString":"@@ -1 +1 @@\n-old 13\n+new 13\n","linesAdded":1,"linesRemoved":1}},"truncated":false}
+
+id: 1757000000000-32
+event: interaction_update
+data: {"stepId":14,"callId":"call-0015","modelCallId":"model-14","text":"example 14","tokens":26,"stepDurationMs":54,"toolCall":{"args":{"command":"npm test -- tests/example-14.test.ts","description":"run example 14","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]}}}
+
+id: 1757000000000-33
+event: tool_call
+data: {"callId":"call-0015","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-14.test.ts","description":"run example 14","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-33
+event: tool_call
+data: {"callId":"call-0015","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-14.test.ts","description":"run example 14","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-34
+event: tool_call
+data: {"callId":"call-0015","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-14.test.ts","description":"run example 14","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-34
+event: tool_call
+data: {"callId":"call-0015","name":"run_terminal_cmd","status":"completed","args":{"command":"npm test -- tests/example-14.test.ts","description":"run example 14","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"result":{"isBackground":false,"success":{"command":"npm test -- tests/example-14.test.ts","executionTime":1214,"localExecutionTimeMs":1204,"interleavedOutput":"example 14: 4 passed\n","stdout":"example 14: 4 passed\n"}},"truncated":false}
+
+id: 1757000000000-35
+event: thinking
+data: {"text":"considering example 15"}
+
+id: 1757000000000-35
+event: interaction_update
+data: {"stepId":15,"callId":"call-0016","modelCallId":"model-15","text":"example 15","tokens":27,"stepDurationMs":55,"toolCall":{"args":{"path":"src/example-15.ts","offset":0,"headLimit":200}}}
+
+id: 1757000000000-36
+event: tool_call
+data: {"callId":"call-0016","name":"read_file","status":"running","args":{"path":"src/example-15.ts","offset":0,"headLimit":200},"truncated":false}
+
+id: 1757000000000-36
+event: tool_call
+data: {"callId":"call-0016","name":"read_file","status":"completed","args":{"path":"src/example-15.ts","offset":0,"headLimit":200},"result":{"isBackground":false,"success":{"path":"src/example-15.ts","content":"export const example15 = 15;\n","fileSize":47,"totalLines":1,"readRange":{"start":1,"end":1}}},"truncated":false}
+
+id: 1757000000000-37
+event: assistant
+data: {"text":"Working on example 16."}
+
+id: 1757000000000-37
+event: interaction_update
+data: {"stepId":16,"callId":"call-0017","modelCallId":"model-16","text":"example 16","tokens":28,"stepDurationMs":56,"toolCall":{"args":{"pattern":"example-16","targetDirectory":"/agent/repos/example","multiline":false}}}
+
+id: 1757000000000-38
+event: tool_call
+data: {"callId":"call-0017","name":"grep_search","status":"running","args":{"pattern":"example-16","targetDirectory":"/agent/repos/example","multiline":false},"truncated":false}
+
+id: 1757000000000-38
+event: tool_call
+data: {"callId":"call-0017","name":"grep_search","status":"running","args":{"pattern":"example-16","targetDirectory":"/agent/repos/example","multiline":false},"truncated":false}
+
+id: 1757000000000-39
+event: tool_call
+data: {"callId":"call-0017","name":"grep_search","status":"completed","args":{"pattern":"example-16","targetDirectory":"/agent/repos/example","multiline":false},"result":{"isBackground":false,"success":{"outputMode":"files_with_matches","path":"/agent/repos/example","pattern":"example-16","workspaceResults":{"/agent/repos/example":{"type":"matches","output":{"matches":[{"file":"src/example-16.ts"}],"totalMatches":1}}}}},"truncated":false}
+
+id: 1757000000000-39
+event: interaction_update
+data: {"stepId":17,"callId":"call-0018","modelCallId":"model-17","text":"example 17","tokens":29,"stepDurationMs":57,"toolCall":{"args":{"blockUntilMs":1000,"taskId":"task-17"}}}
+
+id: 1757000000000-40
+event: tool_call
+data: {"callId":"call-0018","name":"await","status":"running","args":{"blockUntilMs":1000,"taskId":"task-17"},"truncated":false}
+
+id: 1757000000000-40
+event: tool_call
+data: {"callId":"call-0018","name":"await","status":"running","args":{"blockUntilMs":1000,"taskId":"task-17"},"truncated":false}
+
+id: 1757000000000-41
+event: tool_call
+data: {"callId":"call-0018","name":"await","status":"running","args":{"blockUntilMs":1000,"taskId":"task-17"},"truncated":false}
+
+id: 1757000000000-41
+event: tool_call
+data: {"callId":"call-0018","name":"await","status":"completed","args":{"blockUntilMs":1000,"taskId":"task-17"},"result":{"isBackground":false,"success":{"complete":true}},"truncated":false}
+
+id: 1757000000000-42
+event: thinking
+data: {"text":"considering example 18"}
+
+id: 1757000000000-42
+event: interaction_update
+data: {"stepId":18,"callId":"call-0019","modelCallId":"model-18","text":"example 18","tokens":30,"stepDurationMs":58,"toolCall":{"args":{"command":"npm test -- tests/example-18.test.ts","description":"run example 18","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]}}}
+
+id: 1757000000000-43
+event: tool_call
+data: {"callId":"call-0019","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-18.test.ts","description":"run example 18","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-43
+event: tool_call
+data: {"callId":"call-0019","name":"run_terminal_cmd","status":"completed","args":{"command":"npm test -- tests/example-18.test.ts","description":"run example 18","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"result":{"isBackground":false,"success":{"command":"npm test -- tests/example-18.test.ts","executionTime":1218,"localExecutionTimeMs":1208,"interleavedOutput":"example 18: 4 passed\n","stdout":"example 18: 4 passed\n"}},"truncated":false}
+
+id: 1757000000000-44
+event: interaction_update
+data: {"stepId":19,"callId":"call-0020","modelCallId":"model-19","text":"example 19","tokens":31,"stepDurationMs":59,"toolCall":{"args":{"path":"src/example-19.ts","offset":0,"headLimit":200}}}
+
+id: 1757000000000-44
+event: tool_call
+data: {"callId":"call-0020","name":"read_file","status":"running","args":{"path":"src/example-19.ts","offset":0,"headLimit":200},"truncated":false}
+
+id: 1757000000000-45
+event: tool_call
+data: {"callId":"call-0020","name":"read_file","status":"running","args":{"path":"src/example-19.ts","offset":0,"headLimit":200},"truncated":false}
+
+id: 1757000000000-45
+event: tool_call
+data: {"callId":"call-0020","name":"read_file","status":"completed","args":{"path":"src/example-19.ts","offset":0,"headLimit":200},"result":{"isBackground":false,"success":{"path":"src/example-19.ts","content":"export const example19 = 19;\n","fileSize":51,"totalLines":1,"readRange":{"start":1,"end":1}}},"truncated":false}
+
+id: 1757000000000-46
+event: assistant
+data: {"text":"Working on example 20."}
+
+id: 1757000000000-46
+event: interaction_update
+data: {"stepId":20,"callId":"call-0021","modelCallId":"model-20","text":"example 20","tokens":32,"stepDurationMs":60,"toolCall":{"args":{"command":"npm test -- tests/example-20.test.ts","description":"run example 20","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]}}}
+
+id: 1757000000000-47
+event: tool_call
+data: {"callId":"call-0021","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-20.test.ts","description":"run example 20","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-47
+event: tool_call
+data: {"callId":"call-0021","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-20.test.ts","description":"run example 20","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-48
+event: tool_call
+data: {"callId":"call-0021","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-20.test.ts","description":"run example 20","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-48
+event: tool_call
+data: {"callId":"call-0021","name":"run_terminal_cmd","status":"completed","args":{"command":"npm test -- tests/example-20.test.ts","description":"run example 20","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"result":{"isBackground":false,"success":{"command":"npm test -- tests/example-20.test.ts","executionTime":1220,"localExecutionTimeMs":1210,"interleavedOutput":"example 20: 4 passed\n","stdout":"example 20: 4 passed\n","stderr":"example 20: 1 warning\n"}},"truncated":false}
+
+id: 1757000000000-49
+event: thinking
+data: {"text":"considering example 21"}
+
+id: 1757000000000-49
+event: interaction_update
+data: {"stepId":21,"callId":"call-0022","modelCallId":"model-21","text":"example 21","tokens":33,"stepDurationMs":61,"toolCall":{"args":{"path":"src/example-21.ts","offset":0,"headLimit":200}}}
+
+id: 1757000000000-50
+event: tool_call
+data: {"callId":"call-0022","name":"read_file","status":"running","args":{"path":"src/example-21.ts","offset":0,"headLimit":200},"truncated":false}
+
+id: 1757000000000-50
+event: tool_call
+data: {"callId":"call-0022","name":"read_file","status":"completed","args":{"path":"src/example-21.ts","offset":0,"headLimit":200},"result":{"isBackground":false,"success":{"path":"src/example-21.ts","content":"export const example21 = 21;\n","fileSize":53,"totalLines":1,"readRange":{"start":1,"end":1}}},"truncated":false}
+
+id: 1757000000000-51
+event: interaction_update
+data: {"stepId":22,"callId":"call-0023","modelCallId":"model-22","text":"example 22","tokens":34,"stepDurationMs":62,"toolCall":{"args":{"command":"npm test -- tests/example-22.test.ts","description":"run example 22","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]}}}
+
+id: 1757000000000-51
+event: tool_call
+data: {"callId":"call-0023","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-22.test.ts","description":"run example 22","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-52
+event: tool_call
+data: {"callId":"call-0023","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-22.test.ts","description":"run example 22","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-52
+event: tool_call
+data: {"callId":"call-0023","name":"run_terminal_cmd","status":"completed","args":{"command":"npm test -- tests/example-22.test.ts","description":"run example 22","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"result":{"error":{"message":"example 22 failed","command":"false # 22"}},"truncated":false}
+
+id: 1757000000000-53
+event: interaction_update
+data: {"stepId":23,"callId":"call-0024","modelCallId":"model-23","text":"example 23","tokens":35,"stepDurationMs":63,"toolCall":{"args":{"path":"src/example-23.ts","offset":0,"headLimit":200}}}
+
+id: 1757000000000-53
+event: tool_call
+data: {"callId":"call-0024","name":"read_file","status":"running","args":{"path":"src/example-23.ts","offset":0,"headLimit":200},"truncated":false}
+
+id: 1757000000000-54
+event: tool_call
+data: {"callId":"call-0024","name":"read_file","status":"running","args":{"path":"src/example-23.ts","offset":0,"headLimit":200},"truncated":false}
+
+id: 1757000000000-54
+event: tool_call
+data: {"callId":"call-0024","name":"read_file","status":"running","args":{"path":"src/example-23.ts","offset":0,"headLimit":200},"truncated":false}
+
+id: 1757000000000-55
+event: tool_call
+data: {"callId":"call-0024","name":"read_file","status":"completed","args":{"path":"src/example-23.ts","offset":0,"headLimit":200},"result":{"isBackground":false,"success":{"path":"src/example-23.ts","content":"export const example23 = 23;\n","fileSize":55,"totalLines":1,"readRange":{"start":1,"end":1}}},"truncated":false}
+
+id: 1757000000000-55
+event: thinking
+data: {"text":"considering example 24"}
+
+id: 1757000000000-56
+event: assistant
+data: {"text":"Working on example 24."}
+
+id: 1757000000000-56
+event: interaction_update
+data: {"stepId":24,"callId":"call-0025","modelCallId":"model-24","text":"example 24","tokens":36,"stepDurationMs":64,"toolCall":{"args":{"command":"npm test -- tests/example-24.test.ts","description":"run example 24","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]}}}
+
+id: 1757000000000-57
+event: tool_call
+data: {"callId":"call-0025","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-24.test.ts","description":"run example 24","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-57
+event: interaction_update
+data: {"stepId":25,"callId":"call-0026","modelCallId":"model-25","text":"example 25","tokens":37,"stepDurationMs":65,"toolCall":{"args":{"path":"src/example-25.ts","offset":0,"headLimit":200}}}
+
+id: 1757000000000-58
+event: tool_call
+data: {"callId":"call-0026","name":"read_file","status":"running","args":{"path":"src/example-25.ts","offset":0,"headLimit":200},"truncated":false}
+
+id: 1757000000000-58
+event: tool_call
+data: {"callId":"call-0026","name":"read_file","status":"running","args":{"path":"src/example-25.ts","offset":0,"headLimit":200},"truncated":false}
+
+id: 1757000000000-59
+event: interaction_update
+data: {"stepId":26,"callId":"call-0027","modelCallId":"model-26","text":"example 26","tokens":38,"stepDurationMs":66,"toolCall":{"args":{"command":"npm test -- tests/example-26.test.ts","description":"run example 26","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]}}}
+
+id: 1757000000000-59
+event: tool_call
+data: {"callId":"call-0027","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-26.test.ts","description":"run example 26","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-60
+event: tool_call
+data: {"callId":"call-0027","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-26.test.ts","description":"run example 26","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-60
+event: tool_call
+data: {"callId":"call-0027","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-26.test.ts","description":"run example 26","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-61
+event: thinking
+data: {"text":"considering example 27"}
+
+id: 1757000000000-61
+event: interaction_update
+data: {"stepId":27,"callId":"call-0028","modelCallId":"model-27","text":"example 27","tokens":39,"stepDurationMs":67,"toolCall":{"args":{"command":"npm test -- tests/example-27.test.ts","description":"run example 27","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]}}}
+
+id: 1757000000000-62
+event: tool_call
+data: {"callId":"call-0028","name":"run_terminal_cmd","status":"running","args":{"command":"npm test -- tests/example-27.test.ts","description":"run example 27","timeout":120,"timeoutBehavior":"cancel","closeStdin":true,"simpleCommands":["npm"]},"truncated":false}
+
+id: 1757000000000-62
+event: tool_call
+data: <<not json>>
+
+event: status
+data: {"runId":"run-export-1","status":"FINISHED"}
+
+id: 1757000000000-63
+event: result
+data: {"runId":"run-export-1","status":"FINISHED","durationMs":14400000,"text":"Example run finished.","git":{"branches":[{"repoUrl":"https://github.com/ExampleOrg/ExampleRepo","branch":"cursor/example-1","prUrl":"https://github.com/ExampleOrg/ExampleRepo/pull/1"}]}}
+
+id: 1757000000000-63
+event: done
+data: {}
+

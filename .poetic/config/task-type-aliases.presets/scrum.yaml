@@ -1,0 +1,17 @@
+# OPT-IN preset: Scrum terminology -> Poetic registry task-type ids.
+#
+# This is an EXAMPLE preset, NOT active by default. To use it, copy its contents
+# into your repo's `.poetic/config/task-type-aliases.yaml` (or merge selected
+# entries). Values must match real registry ids (`poetic task-type list`); edit
+# them if your repo defines custom task types.
+#
+# Declared terms are opaque to Poetic's core: this file only maps them to a
+# canonical id for resolution convenience; the declared term is still recorded
+# verbatim on the work item.
+aliases:
+  epic: feature
+  story: feature
+  task: general
+  spike: analysis
+  bug: general
+  chore: general

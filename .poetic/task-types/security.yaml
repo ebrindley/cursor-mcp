@@ -1,0 +1,39 @@
+id: security
+version: 1
+extends: general
+match:
+  priority: 20
+  keywords:
+    - security
+    - auth
+    - authentication
+    - authorization
+    - token
+    - jwt
+    - oauth
+    - csrf
+    - xss
+    - vuln
+    - vulnerability
+policy:
+  routing:
+    defaultStrategy: conservative
+    preferCompetition: true
+  decomposition:
+    requiredStageTypes:
+      - verify
+    maxParallelGroups: 1
+    guidance:
+      hints:
+        - Keep allowlists tight and explicit
+        - Add deterministic verify commands (tests/typecheck)
+      antiPatterns:
+        - Do not broaden allowlists to "make it work"
+        - Avoid parallel changes to auth/security surfaces
+  judging:
+    framework: hybrid
+    defaultScore: 80
+    minimumScore: 70
+  allowlist:
+    requireNonEmpty: true
+    mode: strict

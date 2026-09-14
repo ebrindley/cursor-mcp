@@ -1,0 +1,28 @@
+{
+  "defaultProfile": "my-repository",
+  "profiles": {
+    "my-repository": {
+      "repos": [
+        "ExampleOrg/ExampleRepo"
+      ],
+      "allowNoRepository": false,
+      "tools": [
+        "cursor_whoami",
+        "cursor_list_models",
+        "cursor_list_repos",
+        "cursor_list_agents",
+        "cursor_get_agent",
+        "cursor_list_runs",
+        "cursor_get_run",
+        "cursor_wait_run",
+        "cursor_get_usage",
+        "cursor_list_artifacts",
+        "cursor_get_artifact_url",
+        "cursor_create_agent",
+        "cursor_create_run",
+        "cursor_cancel_run"
+      ],
+      "autoCreatePR": true
+    }
+  }
+}

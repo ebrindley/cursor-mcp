@@ -1,0 +1,6 @@
+{
+  // Trailing commas are rejected: the published schema sets
+  // allowTrailingCommas: false.
+  "name": "trailing-comma",
+  "install": "make deps",
+}

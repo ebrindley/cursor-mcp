@@ -1,0 +1,35 @@
+id: doc
+version: 1
+match:
+  priority: 6
+  # Suppress doc matching for prompts with strong code-only signals unless the
+  # prompt has a direct documentation deliverable intent (resolver reads this
+  # flag generically instead of hardcoding the 'doc' id).
+  suppressWhenCodeOnly: true
+  canonical:
+    category:
+      - execute
+    judgeTaskKind:
+      - documentation
+  keywords:
+    - doc
+    - docs
+    - documentation
+    - template
+    - claude.md
+    - agents.md
+    - readme
+    - guideline
+    - drift
+    - guide
+    - instructions
+    - specification
+    - spec
+  regex:
+    - \b(fix|create|update|add|write|generate)\b.{0,40}\b(doc|docs|documentation|template|readme|guideline|guide|instructions|specification|spec)\b
+    - \b(claude\.md|agents\.md|gemini\.md)\b
+policy:
+  executionIntent: edit
+  routing:
+    defaultStrategy: hybrid
+    preferCompetition: false

@@ -1,0 +1,63 @@
+{
+  "name": "@ebrindley/cursor-mcp",
+  "version": "0.9.0",
+  "description": "MCP server exposing the Cursor Cloud Agents v1 API to Claude Code, Codex, Grok, and Cursor",
+  "type": "module",
+  "license": "MIT",
+  "author": "Ed Brindley",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ebrindley/cursor-mcp.git"
+  },
+  "homepage": "https://github.com/ebrindley/cursor-mcp#readme",
+  "bugs": "https://github.com/ebrindley/cursor-mcp/issues",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20.3"
+  },
+  "bin": {
+    "cursor-mcp": "dist/bin.js"
+  },
+  "main": "dist/server.js",
+  "types": "dist/server.d.ts",
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "README.md",
+    "LICENSE",
+    "policy.example.json",
+    "policy.quickstart.json"
+  ],
+  "scripts": {
+    "build": "tsc && node scripts/write-build-info.mjs",
+    "prepublishOnly": "npm run build && npm test && npm run check:bin",
+    "typecheck": "tsc --noEmit && tsc --project tsconfig.test.json",
+    "test": "vitest run",
+    "test:install": "node --test tests/install.test.mjs",
+    "test:watch": "vitest",
+    "dev": "tsx src/server.ts",
+    "audit": "npm audit --audit-level=high",
+    "check:bin": "node scripts/check-bin.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:write": "node scripts/smoke.mjs --write",
+    "demo": "node scripts/demo.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.20.6",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "cursor",
+    "cloud-agents"
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "deleteEnabled": false,
+  "activationEnabled": false,
+  "defaultProfile": "read-only",
+  "maxResponseBytes": 32768,
+  "profiles": {
+    "read-only": {
+      "repos": [],
+      "tools": ["read:*"]
+    },
+    "any-connected-repo-example": {
+      "repos": ["*"],
+      "tools": [
+        "read:*",
+        "cursor_create_agent",
+        "cursor_create_run",
+        "cursor_cancel_run"
+      ],
+      "autoCreatePR": false
+    },
+    "write-enabled-example": {
+      "repos": ["ExampleOrg/ExampleRepo"],
+      "environments": ["example-environment"],
+      "tools": [
+        "read:*",
+        "cursor_create_agent",
+        "cursor_create_run",
+        "cursor_cancel_run"
+      ],
+      "autoCreatePR": false
+    },
+    "environment-operations-example": {
+      "repos": ["ExampleOrg/ExampleRepo"],
+      "environments": ["example-environment"],
+      "tools": [
+        "read:*",
+        "cursor_inspect_environment",
+        "cursor_list_builds",
+        "cursor_get_build",
+        "cursor_get_build_logs",
+        "cursor_trigger_build",
+        "cursor_qualify_environment",
+        "cursor_refresh_environment_toolchain"
+      ],
+      "autoCreatePR": false
+    }
+  }
+}

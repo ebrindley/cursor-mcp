@@ -1,0 +1,15 @@
+{
+  "name": "observed-environment",
+  "user": "ubuntu",
+  "install": "set -euo pipefail\n\nif [ -f package-lock.json ]; then\n  npm ci\nfi\n",
+  "start": "set -euo pipefail\n\nnpm run build --if-present\n",
+  "terminals": [
+    {
+      "name": "server",
+      "command": "npm run start",
+      "description": "Runs the service the task under test talks to."
+    }
+  ],
+  "ports": [{ "name": "http", "port": 8080 }],
+  "snapshot": "snapshot-placeholder"
+}

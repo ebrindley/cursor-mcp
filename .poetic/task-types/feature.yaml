@@ -1,0 +1,23 @@
+id: feature
+version: 1
+match:
+  priority: 5
+  canonical:
+    category:
+      - execute
+      - test
+    judgeTaskKind:
+      - implementation
+  keywords:
+    - add
+    - implement
+    - build
+    - feature
+    - functionality
+  regex:
+    - \b(create|new)\b.{0,40}\b(feature|endpoint|route|api|page|screen|component|command|workflow|integration|support|capability|enhancement)\b
+policy:
+  executionIntent: edit
+  routing:
+    defaultStrategy: hybrid
+    preferCompetition: false

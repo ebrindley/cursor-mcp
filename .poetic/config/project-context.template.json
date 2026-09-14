@@ -1,0 +1,6 @@
+{
+  "projectName": "{{PROJECT_NAME}}",
+  "language": "{{LANGUAGE}}",
+  "framework": "{{FRAMEWORK}}",
+  "detectedAt": "{{DETECTED_AT}}"
+}

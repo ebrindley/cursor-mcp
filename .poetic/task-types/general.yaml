@@ -1,0 +1,6 @@
+id: general
+version: 1
+policy:
+  executionIntent: edit
+  routing:
+    defaultStrategy: hybrid

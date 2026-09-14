@@ -1,0 +1,28 @@
+# Task-type alias map (declared work-item terminology -> registry task-type id)
+#
+# OPT-IN. Ships EMPTY by design. Out of the box, NO declared term is mapped to a
+# canonical task-type id: a declared term (from `poetic backlog add --type <term>`
+# or `--work-type <term>`) still round-trips verbatim, and task-type resolution
+# falls back to prose inference. This file is convenience, never a dependency.
+#
+# Poetic's core stays methodology-agnostic: methodology terms (epic/story/spike/
+# chore/rock/...) are OPAQUE data here, never branched on in code. To opt in to a
+# methodology mapping, either add entries below or copy a preset from
+# `templates/.poetic/config/task-type-aliases.presets/` into your repo's
+# `.poetic/config/task-type-aliases.yaml` and edit to taste.
+#
+# Format (either a flat map or an `aliases:` wrapper works):
+#
+#   aliases:
+#     epic: feature
+#     story: feature
+#     spike: analysis
+#     chore: general
+#
+# Mapped values MUST be real registry task-type ids (see `poetic task-type list`).
+# A mapped id that does not exist in the registry is ignored (resolution falls
+# through to inference); `poetic task-type` validation will warn about it.
+#
+# Declared terms are recorded and matched VERBATIM (no lowercasing / inference).
+#
+# (intentionally empty)

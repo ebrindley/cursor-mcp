@@ -1,0 +1,55 @@
+# Poetic Artifacts
+# Generated files and runtime data - safe to ignore
+
+artifacts/
+.artifacts/
+
+# Runtime state (never commit)
+config/project-context.json
+state/
+telemetry/
+worktrees/
+cache/
+registry/
+repair-patches/
+autoloop/
+validation/
+xdg-state/
+runs/
+blocker-answers/
+merge-apply/
+provenance/
+reviews/
+codex-home/
+cursor/
+copilot/
+edits
+edits.jsonl
+implementations/
+labs/
+lifecycle/
+memory/
+provider-history/
+prompts/
+planning/indexes/
+
+# Logs
+*.log
+*.jsonl
+# Intent context-injection telemetry (transient diagnostics: token usage,
+# selection metrics, timing). Written as `logs/injection/injection-<ts>.json`
+# by `poetic intent inject`; never durable, so keep it out of the tree.
+logs/injection/
+
+# Database files (SQLite + WAL)
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Temporary files
+temp/
+tmp/
+.cache/

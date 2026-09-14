@@ -1,0 +1,14 @@
+# OPT-IN preset: Kanban terminology -> registry task-type ids.
+#
+# EXAMPLE preset, NOT active by default. Copy into your repo's
+# `.poetic/config/task-type-aliases.yaml` to opt in. Values must match real
+# registry ids (`poetic task-type list`). Declared terms remain opaque to the
+# core and are recorded verbatim on the item.
+aliases:
+  feature: feature
+  enhancement: feature
+  bug: general
+  defect: general
+  task: general
+  research: analysis
+  documentation: doc
