@@ -12,6 +12,7 @@ import type { Policy } from "../config.js";
 import { AgentListSchema } from "../schemas.js";
 import { activeProfile } from "../config.js";
 import {
+  AGENT_INVENTORY,
   ENV_LIST_ARGS,
   cliAuthorityBlock,
   cursorCliReadiness,
@@ -111,13 +112,14 @@ function rejected(
 ): ReturnType<typeof ok> {
   return ok({
     source: "cursor CLI output",
-    text: `${args.status}: ${args.reason}`,
+    text: `${args.status}: ${args.reason}\n${AGENT_INVENTORY}`,
     structured: {
       status: args.status,
       cli: cliAuthorityBlock(args.readiness),
       reason: args.reason,
       nextSteps: [
         "The CLI answered, but not in a shape this server will parse. Nothing is retried through a delegated run.",
+        AGENT_INVENTORY,
       ],
     },
     policy,
@@ -243,7 +245,7 @@ export function registerEnvironmentCatalogTools(
     config: {
       title: "Cursor: list environments",
       description:
-        "Discover environments and their repositories. Uses a configured CLI catalog when available; account mode otherwise reports environments observed on agents (partial). Use these associations with the current project Git remote; ask only if the task target is ambiguous.",
+        "Discover environments and their repositories. Uses a configured CLI catalog when available. Profiles with environmentAccess \"account\" otherwise report environment names observed on agents launched with a named environment (partial); other profiles report the CLI status only. Existing agents themselves are listed by cursor_list_agents. Use these associations with the current project Git remote; ask only if the task target is ambiguous.",
       inputSchema: { scope: ScopeFilter.optional(), cursor: z.string().optional() },
       outputSchema: RESULT_OUT,
       annotations: READ,
@@ -267,10 +269,12 @@ export function registerEnvironmentCatalogTools(
         return ok({
           source: "GET /v1/agents",
           text: "Environments observed on this agent page; not a complete saved-environment catalog. Ownership scope is unknown.\n" +
-            (environments.map(e => `${e.name}: ${e.repos.join(", ") || "repositories not reported"}`).join("\n") || "(no matching names on this page)"),
+            (environments.map(e => `${e.name}: ${e.repos.join(", ") || "repositories not reported"}`).join("\n") || "(no matching names on this page)") +
+            `\n${AGENT_INVENTORY}`,
           structured: {
             status: "OBSERVED",
             cli: cliAuthorityBlock(state),
+            nextSteps: [AGENT_INVENTORY],
             environments,
             catalog: { source: "agents", complete: false, scanned: page.items.length, returned: environments.length },
             ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),

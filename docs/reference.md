@@ -241,6 +241,9 @@ exists: without one you get `CLI_NOT_CONFIGURED`, and otherwise `CLI_READS_DISAB
 `CLI_IDENTITY_MISMATCH`, each with the version and contract fingerprint actually observed.
 Neither ever falls back to a delegated run — that would spend quota and quietly change which
 authority answered, so `cursor_inspect_environment` stays the explicit way to ask a delegate.
+Every unavailable result, and the account-mode observed result, also names the inventory that
+does exist without a CLI: `cursor_list_agents` lists existing cloud-agent records when the
+profile permits it, at no run cost.
 The child process gets no shell, no stdin, a controlled working directory, a rebuilt
 environment that never carries `CURSOR_API_KEY`, a byte ceiling, and a timeout that reaps
 descendants. Because the CLI authenticates as whoever logged it in rather than as this
