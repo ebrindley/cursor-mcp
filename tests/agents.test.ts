@@ -1951,7 +1951,7 @@ describe("late environment discovery", () => {
       const url = String(input);
       if (url.endsWith("/v1/agents") && init?.method === "POST") return json(createdPayload());
       if (url.endsWith("/cancel")) return json({ id: "run-1" });
-      return json(createdPayload({ env: { type: "cloud", name: "poetic-dogfood" } }).agent);
+      return json(createdPayload({ env: { type: "cloud", name: "example-environment" } }).agent);
     });
     const client = await connect(fetchImpl, policy(["*"]), true);
     const launch = await client.callTool({name: "cursor_create_agent", arguments: {repo: "ExampleOrg/ExampleRepo", prompt: "x"}});
@@ -1959,7 +1959,7 @@ describe("late environment discovery", () => {
     expect(launch.structuredContent).toMatchObject({targetVerified: true, environmentVerified: false});
     const denied = await client.callTool({name: "cursor_get_run", arguments: {agentId: "bc-1", runId: "run-1"}});
     expect(denied.isError).toBe(true);
-    expect(text(denied)).toContain("poetic-dogfood");
+    expect(text(denied)).toContain("example-environment");
     const followup = await client.callTool({name: "cursor_create_run", arguments: {agentId: "bc-1", prompt: "x"}});
     expect(followup.isError).toBe(true);
     expect(fetchImpl.mock.calls.some(([url, init]) => String(url).endsWith("/runs") && init?.method === "POST")).toBe(false);

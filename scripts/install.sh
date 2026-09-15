@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Public source installer. The archive/build/atomic-release mechanism is adapted
-# from the Claude plugin's sync-cursor-mcp.sh; scheduling belongs to the caller.
+# Public source installer: archive, build, atomic release. Scheduling belongs to the caller.
 set -euo pipefail
 umask 077
 ROOT="${CURSOR_MCP_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/cursor-mcp}"
