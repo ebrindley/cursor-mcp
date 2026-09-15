@@ -43,6 +43,10 @@ test('owned sessions support persistent input/resize, bounded concurrency and sa
   const f = fixture(65536, 2), a = await f.create(), b = await f.create(2);
   expect(a.terminalId).not.toBe(b.terminalId); expect(await f.create(3)).toMatchObject({ status: 'session_capacity' });
   const input = f.request('input', { terminalId: a.terminalId, sequence: 1, data: 'cd /tmp\n' });
+  // 5462 euro signs are 16386 UTF-8 bytes. Refused before any sequence bookkeeping, so sequence 1 stays usable below.
+  expect(await f.service.handle({ ...input, data: '€'.repeat(5462) })).toMatchObject({ status: 'invalid_request',
+    inputOutcome: 'not_submitted', reason: 'input_too_large', bytes: 16386, maxBytes: 16384 });
+  expect(f.calls.some(c => c.method === 'SendInput')).toBe(false);
   expect(await f.service.handle(input)).toMatchObject({ inputOutcome: 'submitted', nextInputSequence: 2 });
   expect(await f.service.handle(input)).toMatchObject({ inputOutcome: 'submitted' });
   expect(await f.service.handle({ ...input, data: 'changed' })).toMatchObject({ status: 'sequence_conflict' });
@@ -53,7 +57,10 @@ test('owned sessions support persistent input/resize, bounded concurrency and sa
   expect(await f.service.handle(f.request('resize', { terminalId: a.terminalId, cols: 120, rows: 40 }))).toMatchObject({ status: 'resized' });
   expect(await f.service.handle(f.request('close', { terminalId: a.terminalId }))).toMatchObject({ status: 'closed' });
   expect(await f.create(1)).toMatchObject({ status: 'request_retired' });
-  expect((await f.create(3)).terminalId).toBeTypeOf('string'); f.service.close();
+  expect((await f.create(3)).terminalId).toBeTypeOf('string');
+  // Input at the byte limit is accepted.
+  expect(await f.service.handle(f.request('input', { terminalId: b.terminalId, sequence: 1, data: 'x'.repeat(16384) })))
+    .toMatchObject({ inputOutcome: 'submitted', nextInputSequence: 2 }); f.service.close();
 });
 
 test('stream loss detaches, resumes from opaque cursor, suppresses replay and exposes output gaps', async () => {

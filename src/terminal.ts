@@ -12,6 +12,8 @@ type Command = {
   bytes: Buffer; machineId?: string; ptyId?: string; peer?: TerminalPeer; wake?: (reason: string) => void;
 };
 
+const MAX_COMMAND_BYTES = 16384;
+
 /** One owned process at a time; retained IDs are never evicted and silently executed again. */
 export class TerminalService {
   sessionId = randomUUID();
@@ -125,8 +127,12 @@ export class TerminalService {
       return this.snapshot(op, offset, limit);
     }
     const { command, commandId, timeoutMs } = request;
+    // Reject oversized source before recording or submitting a command.
+    const commandBytes = typeof command === 'string' ? Buffer.byteLength(command) : 0;
+    if (commandBytes > MAX_COMMAND_BYTES) return { status: 'invalid_request', commandOutcome: 'not_submitted',
+      reason: 'command_too_large', bytes: commandBytes, maxBytes: MAX_COMMAND_BYTES };
     if (request.operation !== 'execute' || typeof commandId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(commandId) ||
-      typeof command !== 'string' || !command.length || Buffer.byteLength(command) > 16384 || command.includes('\0') ||
+      typeof command !== 'string' || !command.length || command.includes('\0') ||
       !Number.isInteger(timeoutMs) || timeoutMs! < 1 || timeoutMs! > 300000) return { status: 'invalid_request', commandOutcome: 'not_submitted' };
     const digest = createHash('sha256').update(JSON.stringify([command, timeoutMs])).digest('hex');
     const previous = this.results.get(commandId);

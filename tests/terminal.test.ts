@@ -138,16 +138,41 @@ test('real MCP validates source and emits terminal output only in sanitized stru
   try {
     await client.callTool({ name: 'cursor_terminal_status', arguments: {} });
     calls.length = 0;
-    for (const command of ['€'.repeat(6000), 'x\0y']) {
-      expect((await client.callTool({ name: 'cursor_terminal_execute', arguments: { ...args, command } })).isError).toBe(true);
-    }
+    expect((await client.callTool({ name: 'cursor_terminal_execute', arguments: { ...args, command: 'x\0y' } })).isError).toBe(true);
     expect(calls).toEqual([]);
+    // Oversized source reaches this stub handler.
+    expect((await client.callTool({ name: 'cursor_terminal_execute', arguments: { ...args, command: '€'.repeat(6000) } })).isError).not.toBe(true);
+    expect(calls).toHaveLength(1); calls.length = 0;
     const result = await client.callTool({ name: 'cursor_terminal_execute', arguments: { ...args, command: "printf 'x\ty'\nexit 7" } });
     expect(result.structuredContent).toMatchObject({ outputTruncated: true, exitCode: 7 });
     expect(JSON.stringify(result.structuredContent)).toContain('UNIQUE_PAYLOAD');
     expect(JSON.stringify(result.content)).not.toContain('UNIQUE_PAYLOAD');
     expect(JSON.stringify(result)).not.toContain('u001b'); expect(calls).toHaveLength(1);
   } finally { await client.close(); await server.close(); }
+});
+
+test('oversized command is refused before submission with machine-readable size fields', async () => {
+  const f = fixture();
+  const server = new McpServer({ name: 'fixture', version: '1' });
+  registerTerminalTools(server, PolicySchema.parse({ deleteEnabled: true, terminal: { agentId: 'bc-test', executeEnabled: true },
+    defaultProfile: 'terminal', profiles: { terminal: { tools: ['*'] } } }), '', f.service);
+  const client = new Client({ name: 'fixture-client', version: '1' });
+  const [ct, st] = InMemoryTransport.createLinkedPair(); await server.connect(st); await client.connect(ct);
+  const args = { sessionId: f.service.sessionId, commandId: 'one', timeoutMs: 10000 };
+  try {
+    await client.callTool({ name: 'cursor_terminal_status', arguments: {} });
+    // 5462 euro signs are 16386 UTF-8 bytes: the cap counts bytes, not code points.
+    const refused = await client.callTool({ name: 'cursor_terminal_execute', arguments: { ...args, command: '€'.repeat(5462) } });
+    expect(refused.isError).not.toBe(true);
+    expect(refused.structuredContent).toMatchObject({ status: 'invalid_request', commandOutcome: 'not_submitted',
+      reason: 'command_too_large', bytes: 16386, maxBytes: 16384 });
+    expect(JSON.stringify(refused.content)).toContain('command_too_large');
+    expect(f.calls).not.toContain('SpawnPty');
+    // The rejected attempt created no record, so the same commandId still accepts work, and the cap boundary itself is accepted.
+    expect((await client.callTool({ name: 'cursor_terminal_execute', arguments: { ...args, command: 'x'.repeat(16384) } })).structuredContent)
+      .toMatchObject({ status: 'command', state: 'starting', commandOutcome: 'not_submitted' });
+    await f.started(); expect(f.calls.filter(x => x === 'SpawnPty')).toHaveLength(1);
+  } finally { await client.close(); await server.close(); f.service.close(); }
 });
 
 test('multi-target configuration is explicit and keeps the thirteen-tool surface with normal profile filtering', () => {

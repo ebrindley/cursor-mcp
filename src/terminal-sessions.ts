@@ -17,6 +17,7 @@ const sequenceValid = (n: unknown): n is number => Number.isSafeInteger(n) && (n
 const dimensionsValid = (cols: unknown, rows: unknown) => Number.isInteger(cols) && Number.isInteger(rows) &&
   (cols as number) >= 2 && (cols as number) <= 500 && (rows as number) >= 2 && (rows as number) <= 300;
 const code = (error: unknown) => error instanceof TerminalFailure ? error.code : 'terminal_unavailable';
+const MAX_INPUT_BYTES = 16384;
 
 /** Owned shells only. Sequence high-water marks reject retired requests without an unbounded journal. */
 export class TerminalSessions {
@@ -131,7 +132,11 @@ export class TerminalSessions {
     }
     if (request.operation !== 'input' && request.operation !== 'resize') return { status: 'invalid_request' };
     if (request.operation === 'input') {
-      if (!sequenceValid(request.sequence) || typeof request.data !== 'string' || !request.data.length || Buffer.byteLength(request.data) > 16384)
+      // Reject oversized input before hashing it or consuming its sequence.
+      const inputBytes = typeof request.data === 'string' ? Buffer.byteLength(request.data) : 0;
+      if (inputBytes > MAX_INPUT_BYTES) return { status: 'invalid_request', inputOutcome: 'not_submitted',
+        reason: 'input_too_large', bytes: inputBytes, maxBytes: MAX_INPUT_BYTES };
+      if (!sequenceValid(request.sequence) || typeof request.data !== 'string' || !request.data.length)
         return { status: 'invalid_request', inputOutcome: 'not_submitted' };
       const digest = createHash('sha256').update(request.data).digest('hex');
       if (request.sequence < op.nextInputSequence) return op.lastInput?.sequence === request.sequence
