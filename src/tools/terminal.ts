@@ -10,6 +10,7 @@ import { TerminalService } from '../terminal.js';
 import { defineTool } from './register.js';
 import { fitTerminalPage } from '../terminal-output.js';
 import { ok, structuredCost } from './result.js';
+import { sanitize } from '../untrusted.js';
 import { READ, CANCEL, DESTRUCTIVE, REVERSIBLE } from './annotations.js';
 
 export function registerTerminalTools(server: McpServer, policy: Policy, apiKey = '',
@@ -54,12 +55,21 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
       }
     }
     const result = fitTerminalPage(raw, policy.maxResponseBytes);
+    // The text block carries the identifiers and output as well as the state
+    // fields. A client that renders only text content cannot otherwise obtain the
+    // session id it needs for the next call or read a command's output; the MCP
+    // specification expects structured content to be mirrored in text for such
+    // clients. The text passes through the same sanitizer and byte cap as before.
     const summary = Object.fromEntries([
-      'agentId', 'status', 'maxTargets', 'retainedTargets', 'targetOffset', 'targetNextOffset', 'state', 'commandOutcome', 'exitCode', 'signal', 'reason', 'cleanup', 'outputComplete',
+      'agentId', 'status', 'sessionId', 'commandId', 'terminalId', 'nextCreateSequence',
+      'maxTargets', 'retainedTargets', 'targetOffset', 'targetNextOffset', 'state', 'commandOutcome', 'exitCode', 'signal', 'reason', 'cleanup', 'outputComplete',
       'outputReadFailed', 'outputTruncated', 'outputOffset', 'outputNextOffset', 'outputLength',
       'outputStartOffset', 'outputEndOffset', 'outputGap', 'reconnectGapPossible', 'inputOutcome', 'nextInputSequence', 'remoteOutcome', 'bytes', 'maxBytes',
-      'wakeOutcome', 'readiness', 'machineChanged',
-    ].filter(key => Object.hasOwn(result, key)).map(key => [key, result[key]]));
+      'wakeOutcome', 'readiness', 'machineChanged', 'output',
+    ].filter(key => Object.hasOwn(result, key)).map(key => [key, typeof result[key] === 'string' ? sanitize(result[key] as string) : result[key]]));
+    // Strings are sanitized before serialization: JSON.stringify would otherwise
+    // encode a control character as a six-character escape that the text
+    // sanitizer in `ok` no longer recognizes, so the output would carry it.
     return ok({ source: 'Cursor direct VM terminal', text: JSON.stringify(summary), structured: result, policy });
   };
   const add = (operation: string, description: string, schema: z.ZodRawShape, annotations: typeof READ | typeof CANCEL | typeof DESTRUCTIVE | typeof REVERSIBLE) => {

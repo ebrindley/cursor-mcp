@@ -126,9 +126,9 @@ test('terminal config is opt-in, unknown keys fail, and execute/cancel use their
   }
 });
 
-test('real MCP validates source and emits terminal output only in sanitized structured content', async () => {
+test('real MCP validates source and emits sanitized terminal output and identifiers in both text and structured content', async () => {
   const calls: unknown[] = [];
-  const backend = { handle: async (input: unknown) => { calls.push(input); return { status: 'command', state: 'finished', output: '\u001b[31mUNIQUE_PAYLOAD', outputTruncated: true, exitCode: 7 }; }, close() {} };
+  const backend = { handle: async (input: unknown) => { calls.push(input); return { status: 'command', state: 'finished', sessionId: '11111111-1111-4111-8111-111111111111', commandId: 'one', output: '\u001b[31mUNIQUE_PAYLOAD', outputTruncated: true, exitCode: 7 }; }, close() {} };
   const server = new McpServer({ name: 'fixture', version: '1' });
   registerTerminalTools(server, PolicySchema.parse({ deleteEnabled: true, terminal: { agentId: 'bc-test', executeEnabled: true },
     defaultProfile: 'terminal', profiles: { terminal: { tools: ['cursor_terminal_status', 'cursor_terminal_execute', 'cursor_terminal_read'] } } }), '', backend);
@@ -146,7 +146,11 @@ test('real MCP validates source and emits terminal output only in sanitized stru
     const result = await client.callTool({ name: 'cursor_terminal_execute', arguments: { ...args, command: "printf 'x\ty'\nexit 7" } });
     expect(result.structuredContent).toMatchObject({ outputTruncated: true, exitCode: 7 });
     expect(JSON.stringify(result.structuredContent)).toContain('UNIQUE_PAYLOAD');
-    expect(JSON.stringify(result.content)).not.toContain('UNIQUE_PAYLOAD');
+    // A text-only client needs the identifiers for its next call and the output itself.
+    const text = (result.content as Array<{ type: string; text: string }>).map(block => block.text).join('\n');
+    expect(text).toContain('UNIQUE_PAYLOAD');
+    expect(text).toContain('"sessionId":"11111111-1111-4111-8111-111111111111"');
+    expect(text).toContain('"commandId":"one"');
     expect(JSON.stringify(result)).not.toContain('u001b'); expect(calls).toHaveLength(1);
   } finally { await client.close(); await server.close(); }
 });

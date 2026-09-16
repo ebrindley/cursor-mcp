@@ -248,3 +248,23 @@ test('install preserves an existing policy and does not invoke setup', t => {
   assert.doesNotMatch(output, /SETUP_DEFAULT_ACCOUNT/);
   assert.equal(f.read(policy), original);
 });
+
+test('update reports an existing policy without a terminal block and leaves it unchanged', t => {
+  const f = fixture(t);
+  const policy = path.join(f.home, '.config/cursor-mcp/policy.json');
+  fs.mkdirSync(path.dirname(policy), { recursive: true });
+  const original = '{"defaultProfile":"dev","profiles":{"dev":{"tools":["*"]}}}\n';
+  fs.writeFileSync(policy, original);
+  f.ok('install', '--yes');
+  f.commit('second');
+  const output = f.ok('update', '--unattended');
+  assert.match(output, /no terminal block/);
+  assert.match(output, /setup --account --preview/);
+  assert.equal(f.read(policy), original);
+  fs.writeFileSync(policy, '{"defaultProfile":"dev","profiles":{"dev":{"tools":["cursor_whoami"]}},"terminal":{"targets":"profile","executeEnabled":true}}\n');
+  f.commit('third');
+  assert.doesNotMatch(f.ok('update', '--unattended'), /no terminal block/);
+  fs.writeFileSync(policy, 'not json\n');
+  f.commit('fourth');
+  assert.doesNotMatch(f.ok('update', '--unattended'), /no terminal block/);
+});

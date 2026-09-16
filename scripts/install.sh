@@ -227,6 +227,17 @@ for release in "$ROOT"/releases/*; do
 done
 log "Cursor MCP is installed at $ROOT/current ($sha). Restart changed MCP clients to load it."
 
+# Updates preserve the existing policy. A policy written before terminal access
+# existed therefore never gains it; report that once per update, without editing.
+if [ "$MODE" = update ]; then
+  existing_policy="${CURSOR_MCP_POLICY:-$HOME/.config/cursor-mcp/policy.json}"
+  if [ -f "$existing_policy" ]; then
+    terminal_rc=0
+    "$NODE" -e 'let p; try { p = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); } catch { process.exit(2); } process.exit(p && p.terminal ? 0 : 1);' "$existing_policy" </dev/null 2>/dev/null || terminal_rc=$?
+    [ "$terminal_rc" != 1 ] || log "Existing policy has no terminal block, so terminal tools are not registered. Preview the change with: $NODE $ROOT/current/dist/bin.js setup --account --preview"
+  fi
+fi
+
 # First installation configures account access; updates preserve existing policy.
 if [ "$MODE" = install ]; then
   setup_policy="${CURSOR_MCP_POLICY:-$HOME/.config/cursor-mcp/policy.json}"
