@@ -192,10 +192,11 @@ describe("capability detection", () => {
     expect(helpCut.contractFingerprint).toBeUndefined();
   });
 
-  it("never suggests a delegated run as a fallback", async () => {
+  it("never suggests a delegated run as a fallback, and names the agent list that does exist", async () => {
     const { readiness } = await readinessFor("root-help.mjs");
     if (readiness.ready) throw new Error("expected an unavailable readiness");
     expect(readiness.nextSteps.join(" ")).toMatch(/does not fall back to a delegated run/);
+    expect(readiness.nextSteps.join(" ")).toMatch(/cursor_list_agents/);
   });
 });
 

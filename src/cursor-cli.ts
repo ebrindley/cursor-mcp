@@ -1096,6 +1096,15 @@ const NO_VM_FALLBACK =
   "This read does not fall back to a delegated run. Delegated inspection is a distinct authority; " +
   "call cursor_inspect_environment explicitly if you want it.";
 
+/**
+ * The inventory that does exist without a CLI. Named in every unavailable
+ * result so a caller who wanted "the VMs" is not left believing nothing is
+ * readable; the agent list is a published API-key read and costs no run.
+ */
+export const AGENT_INVENTORY =
+  "Existing cloud-agent records remain listable with cursor_list_agents when this profile permits it, " +
+  "without a CLI or a new agent run. Cursor's default includes archived agents; follow nextCursor for further pages.";
+
 function identityStatus(state: Exclude<CliIdentityState, "verified">): string {
   if (state === "mismatch") return "CLI_IDENTITY_MISMATCH";
   if (state === "auth-required") return "CLI_AUTH_REQUIRED";
@@ -1124,7 +1133,7 @@ export async function cursorCliReadiness(args: {
       status: "CLI_NOT_CONFIGURED",
       capability: cap,
       reason: cap.reason,
-      nextSteps: [...cap.nextSteps, NO_VM_FALLBACK],
+      nextSteps: [...cap.nextSteps, NO_VM_FALLBACK, AGENT_INVENTORY],
     };
   }
   if (!cli.environmentReads) {
@@ -1134,7 +1143,7 @@ export async function cursorCliReadiness(args: {
       status: "CLI_READS_DISABLED",
       capability: cap,
       reason: cap.reason,
-      nextSteps: [...cap.nextSteps, NO_VM_FALLBACK],
+      nextSteps: [...cap.nextSteps, NO_VM_FALLBACK, AGENT_INVENTORY],
     };
   }
 
@@ -1145,7 +1154,7 @@ export async function cursorCliReadiness(args: {
       status: `CLI_${cap.availability}`,
       capability: cap,
       reason: cap.reason,
-      nextSteps: [...cap.nextSteps, NO_VM_FALLBACK],
+      nextSteps: [...cap.nextSteps, NO_VM_FALLBACK, AGENT_INVENTORY],
     };
   }
 
@@ -1170,6 +1179,7 @@ export async function cursorCliReadiness(args: {
           ? "Log the CLI in as the account this API key belongs to; this server will not do it for you."
           : "Reconcile the CLI's login with this server's API key before retrying.",
         NO_VM_FALLBACK,
+        AGENT_INVENTORY,
       ],
     };
   }

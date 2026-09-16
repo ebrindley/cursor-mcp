@@ -260,10 +260,11 @@ describe("availability results", () => {
     expect(result.text).not.toContain(OWNER);
   });
 
-  it("names no delegated fallback in any unavailable result", async () => {
+  it("names no delegated fallback in any unavailable result, but does name the agent list", async () => {
     const runner = stubRunner({ "--version": exited("cursor 9.9.9\n") });
     const result = await invoke(policyWith(["read:*"]), runner, ENVIRONMENT_LIST_TOOL);
     expect(result.text).toMatch(/does not fall back to a delegated run/);
+    expect(result.text).toMatch(/cursor_list_agents/);
   });
 });
 
@@ -360,6 +361,7 @@ describe(ENVIRONMENT_LIST_TOOL, () => {
     const result = await invoke(policyWith(["read:*"]), runner, ENVIRONMENT_LIST_TOOL);
     expect(result.structured.status).toBe("CLI_COMMAND_FAILED");
     expect(result.structured.environments).toBeUndefined();
+    expect(result.text).toMatch(/cursor_list_agents/);
   });
 
   it("reports a timeout as a timeout", async () => {
@@ -520,5 +522,6 @@ it("discovers agent environments in account mode without a CLI, with pagination 
   const client = new CursorClient({ apiKey: "sk-test", baseUrl: "https://api.example.test", fetchImpl });
   const result = await invoke(policy, undefined, ENVIRONMENT_LIST_TOOL, { cursor: "first-page" }, client);
   expect(result.structured).toMatchObject({ status: "OBSERVED", nextCursor: "next-page", catalog: { complete: false, scanned: 3 }, environments: [{ name: "dev", repos: ["O/First", "O/Second"], scope: "unknown" }] });
+  expect(result.structured.nextSteps).toEqual([expect.stringContaining("cursor_list_agents")]);
   expect(String(fetchImpl.mock.calls[0]![0])).toContain("cursor=first-page");
 });
