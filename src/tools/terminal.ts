@@ -68,7 +68,7 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
     // clients. The text passes through the same sanitizer and byte cap as before.
     const summary = Object.fromEntries([
       'agentId', 'status', 'sessionId', 'commandId', 'terminalId', 'nextCreateSequence',
-      'maxTargets', 'retainedTargets', 'targetOffset', 'targetNextOffset', 'state', 'commandOutcome', 'exitCode', 'signal', 'reason', 'cleanup', 'outputComplete',
+      'maxTargets', 'retainedTargets', 'targetOffset', 'targetNextOffset', 'state', 'commandOutcome', 'exitCode', 'signal', 'reason', 'httpStatus', 'failedOperation', 'cleanup', 'outputComplete',
       'outputReadFailed', 'outputTruncated', 'outputOffset', 'outputNextOffset', 'outputLength',
       'outputStartOffset', 'outputEndOffset', 'outputGap', 'reconnectGapPossible', 'inputOutcome', 'nextInputSequence', 'remoteOutcome', 'bytes', 'maxBytes',
       'wakeOutcome', 'readiness', 'machineChanged', 'reattachments', 'continuityUncertain', 'hint', 'output',

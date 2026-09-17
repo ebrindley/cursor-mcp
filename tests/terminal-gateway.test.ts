@@ -157,6 +157,9 @@ test.each([true, false, 'omitted', null, 'malformed', 'network', 401, 403, 404, 
     expect(failure).toBeInstanceOf(TerminalFailure);
     expect(failure.submitted).toBe(outcome !== 401 && outcome !== 403);
     expect(failure.message).not.toMatch(/private|credential/);
+    // The detail names the RPC and, for an HTTP rejection, its status; a network failure has no status.
+    expect(failure.detail).toEqual(outcome === 'malformed' ? {} : outcome === 'network'
+      ? { operation: 'WakeBackgroundComposer' } : { httpStatus: outcome, operation: 'WakeBackgroundComposer' });
   }
   expect(calls).toHaveLength(2);
   expect(calls[1]).toEqual({ url: 'https://api2.cursor.sh/aiserver.v1.BackgroundComposerService/WakeBackgroundComposer', body: { bcId: 'bc-test', reason: 1 } });

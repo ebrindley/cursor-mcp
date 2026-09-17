@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { setTimeout as delay } from 'node:timers/promises';
-import { object, TerminalFailure, type TerminalConnector, type TerminalPeer } from './terminal-gateway.js';
+import { object, TerminalFailure, type TerminalConnector, type TerminalPeer, failureFields } from './terminal-gateway.js';
 
 export type TerminalRequest = { operation: string; sessionId?: string; commandId?: string; command?: string;
   timeoutMs?: number; outputOffset?: number; outputLimit?: number; waitMs?: number };
@@ -12,6 +12,7 @@ type Command = {
   reattachments: number; continuityUncertain: boolean; resumable: boolean; gapCheck: boolean;
   lastEventId?: string; lastSeq?: number; seen: Set<string>;
   bytes: Buffer; machineId?: string; ptyId?: string; peer?: TerminalPeer; wake?: (reason: string) => void;
+  httpStatus?: number; failedOperation?: string;
 };
 
 const MAX_COMMAND_BYTES = 16384;
@@ -48,7 +49,7 @@ export class TerminalService {
       if (response.ptys !== undefined && !Array.isArray(response.ptys)) throw new TerminalFailure('invalid_gateway_response');
       return { status: 'ready', machineId };
     } catch (error) {
-      return { status: error instanceof TerminalFailure ? error.code : 'terminal_unavailable', machineId };
+      return { status: error instanceof TerminalFailure ? error.code : 'terminal_unavailable', machineId, ...failureFields(error) };
     } finally { peer?.close(); }
   }
 
@@ -71,6 +72,7 @@ export class TerminalService {
       result.wakeOutcome = error instanceof TerminalFailure && !error.submitted ?
         (['terminal_permission_denied', 'terminal_authentication_expired'].includes(error.code) ? 'rejected' : 'not_submitted') : 'unknown';
       result.reason = error instanceof TerminalFailure ? error.code : 'terminal_connection_failed';
+      Object.assign(result, failureFields(error));
       if (result.wakeOutcome !== 'unknown') return { ...result, readiness: lifetime.aborted ? 'cancelled' : 'skipped' };
     }
     if (lifetime.aborted) return { ...result, readiness: 'cancelled' };
@@ -96,6 +98,7 @@ export class TerminalService {
       state: op.state, commandOutcome: op.commandOutcome, executionEnded: op.executionEnded, exitCode: op.exitCode, signal: op.signal,
       outputComplete: op.outputComplete, outputReadFailed: op.outputReadFailed, outputTruncated: op.outputTruncated,
       cancelRequested: op.cancelRequested, cleanup: op.cleanup, reason: op.reason,
+      ...(op.httpStatus !== undefined ? { httpStatus: op.httpStatus } : {}), ...(op.failedOperation ? { failedOperation: op.failedOperation } : {}),
       reattachments: op.reattachments, continuityUncertain: op.continuityUncertain,
       output: points.slice(offset, offset + limit).join(''), outputOffset: offset,
       outputNextOffset: offset + points.slice(offset, offset + limit).length, outputLength: points.length };
@@ -114,7 +117,7 @@ export class TerminalService {
         const response = await peer.unary('ListPtys', {});
         if (response.ptys !== undefined && !Array.isArray(response.ptys)) throw new TerminalFailure('invalid_gateway_response');
         return { ...base, status: 'ready', transport: 'direct_pty', inferenceRequired: false };
-      } catch (error) { return { ...base, status: error instanceof TerminalFailure ? error.code : 'terminal_unavailable' }; }
+      } catch (error) { return { ...base, status: error instanceof TerminalFailure ? error.code : 'terminal_unavailable', ...failureFields(error) }; }
       finally { peer?.close(); }
     }
     if (request.sessionId !== this.sessionId) return { status: 'session_mismatch', sessionId: this.sessionId };
@@ -198,6 +201,7 @@ export class TerminalService {
     } catch (error) {
       if (error instanceof TerminalFailure && error.submitted) op.commandOutcome = 'unknown';
       op.reason = error instanceof TerminalFailure ? error.code : 'terminal_execution_failed';
+      Object.assign(op, failureFields(error));
     } finally {
       finishing = true; clearTimeout(timer);
       // The deployed AttachPty stream stays open after PtyExited. Detach explicitly.

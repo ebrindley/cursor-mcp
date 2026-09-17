@@ -11,7 +11,7 @@ function fixture(maxBytes = 65536, maxResults = 32) {
   const calls: string[] = [];
   const attachments: Record<string, unknown>[] = [];
   const peers: { closed: boolean }[] = [];
-  const connectFailures: string[] = [];
+  const connectFailures: (string | TerminalFailure)[] = [];
   let rejectStream: ((error: Error) => void) | undefined;
   let endStream: (() => void) | undefined;
   let listener: ((event: Record<string, unknown>) => void) | undefined;
@@ -43,7 +43,7 @@ function fixture(maxBytes = 65536, maxResults = 32) {
   };
   const connector: TerminalConnector = { async connect(expected) {
     if (holdNext) { holdNext = false; await new Promise<void>(resolve => { releaseConnect = resolve; }); }
-    if (connectFailures.length) throw new TerminalFailure(connectFailures.shift()!);
+    if (connectFailures.length) { const next = connectFailures.shift()!; throw typeof next === 'string' ? new TerminalFailure(next) : next; }
     if (changed && expected) throw new TerminalFailure('machine_changed');
     return { machineId: 'machine-1', peer: newPeer() };
   } };
@@ -53,7 +53,7 @@ function fixture(maxBytes = 65536, maxResults = 32) {
     event: (event: Record<string, unknown>) => listener!(event),
     breakStream: (code = 'gateway_disconnected') => rejectStream!(new TerminalFailure(code)),
     endStream: () => endStream!(),
-    failConnect: (...codes: string[]) => connectFailures.push(...codes),
+    failConnect: (...codes: (string | TerminalFailure)[]) => connectFailures.push(...codes),
     holdConnect: () => { holdNext = true; }, connectHeld: () => releaseConnect !== undefined, releaseConnect: () => releaseConnect!(),
     failSpawn: () => { failSpawn = true; }, changeMachine: () => { changed = true; }, failCleanup: () => { cleanupFails = true; }, recoverCleanup: () => { cleanupFails = false; },
     async started() { await vi.waitFor(() => expect(listener).toBeTypeOf('function')); },
@@ -516,14 +516,27 @@ test.each(['ready', 'terminal_permission_denied', 'machine_unavailable', 'invali
   } finally { f.service.close(); }
 });
 
-test.each([true, false, new TerminalFailure('terminal_connection_failed', true)])('wake keeps acknowledgement separate and does not reset or replay (%s)', async outcome => {
+test.each([true, false, new TerminalFailure('terminal_connection_failed', true, { httpStatus: 503, operation: 'WakeBackgroundComposer' })])('wake keeps acknowledgement separate and does not reset or replay (%s)', async outcome => {
   const f = wakeFixture('gateway_unavailable', outcome, true, true), sessionId = f.service.sessionId;
   try {
     expect(await f.service.handle({ operation: 'wake' })).toMatchObject({ sessionId, readiness: 'ready', machineChanged: true,
       wakeOutcome: outcome === true ? 'signaled' : outcome === false ? 'not_signaled' : 'unknown',
-      reason: outcome instanceof Error ? 'terminal_connection_failed' : null });
+      reason: outcome instanceof Error ? 'terminal_connection_failed' : null,
+      ...(outcome instanceof Error ? { httpStatus: 503, failedOperation: 'WakeBackgroundComposer' } : {}) });
     expect(f.wake).toHaveBeenCalledOnce(); expect(f.calls).toEqual(['ListPtys', 'ListPtys', 'ListPtys']);
     expect(f.service.sessionId).toBe(sessionId);
+  } finally { f.service.close(); }
+});
+
+test('status carries the failed Cursor operation and HTTP status beside the unchanged code', async () => {
+  const f = fixture();
+  try {
+    f.failConnect(new TerminalFailure('terminal_connection_failed', false, { httpStatus: 503, operation: 'GetMachine' }), 'terminal_connection_failed');
+    expect(await f.service.handle({ operation: 'status' })).toMatchObject({ status: 'terminal_connection_failed', httpStatus: 503, failedOperation: 'GetMachine' });
+    const plain = await f.service.handle({ operation: 'status' });
+    expect(plain).toMatchObject({ status: 'terminal_connection_failed' });
+    expect(plain).not.toHaveProperty('httpStatus');
+    expect(plain).not.toHaveProperty('failedOperation');
   } finally { f.service.close(); }
 });
 

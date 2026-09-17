@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
-import { object, TerminalFailure, type TerminalConnector, type TerminalPeer } from './terminal-gateway.js';
+import { object, TerminalFailure, type TerminalConnector, type TerminalPeer, failureFields } from './terminal-gateway.js';
 
 type Delivery = 'not_submitted' | 'submitted' | 'unknown';
 export type SessionRequest = { operation: string; sessionId?: string; terminalId?: string; sequence?: number;
@@ -12,6 +12,7 @@ type Session = {
   output: string; start: number; end: number; decoder: StringDecoder; lastEventId?: string; seen: Set<string>;
   reconnectGapPossible: boolean; nextInputSequence: number; lastInput?: { sequence: number; digest: string; outcome: Delivery };
   busy: boolean; wake: Set<() => void>;
+  httpStatus?: number; failedOperation?: string;
 };
 const sequenceValid = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 1 && (n as number) < Number.MAX_SAFE_INTEGER;
 const dimensionsValid = (cols: unknown, rows: unknown) => Number.isInteger(cols) && Number.isInteger(rows) &&
@@ -38,6 +39,7 @@ export class TerminalSessions {
     const points = [...op.output].slice(actual - op.start, actual - op.start + limit);
     return { status: 'terminal_session', sessionId: this.sessionId, terminalId: op.terminalId, state: op.state,
       creationOutcome: op.creationOutcome, reason: op.reason, cleanup: op.cleanup,
+      ...(op.httpStatus !== undefined ? { httpStatus: op.httpStatus } : {}), ...(op.failedOperation ? { failedOperation: op.failedOperation } : {}),
       releaseAvailable: op.state === 'lost' || (op.state === 'unknown' && !op.ptyId && op.creationOutcome === 'unknown'), exitCode: op.exitCode, signal: op.signal,
       nextInputSequence: op.nextInputSequence, lastInputOutcome: op.lastInput?.outcome ?? null,
       reconnectGapPossible: op.reconnectGapPossible, outputStartOffset: op.start, outputEndOffset: op.end,
@@ -165,7 +167,7 @@ export class TerminalSessions {
         this.detach(op); op.state = 'detached'; op.reason = 'terminal_rpc_timeout';
         op.reconnectGapPossible = true; this.notify(op);
       }
-      return { status: code(error), ...(input ? { inputOutcome: input.outcome, nextInputSequence: op.nextInputSequence } : {}) };
+      return { status: code(error), ...failureFields(error), ...(input ? { inputOutcome: input.outcome, nextInputSequence: op.nextInputSequence } : {}) };
     } finally { op.busy = false; }
   }
 
@@ -198,6 +200,7 @@ export class TerminalSessions {
       await this.attach(op);
     } catch (error) {
       op.reason = code(error);
+      Object.assign(op, failureFields(error));
       if (error instanceof TerminalFailure && error.submitted && !op.ptyId) op.creationOutcome = 'unknown';
       if (!op.ptyId) { op.state = 'unknown'; op.cleanup = op.creationOutcome === 'not_submitted' ? 'not_created' : 'identity_unknown'; }
     } finally { this.creating = false; }

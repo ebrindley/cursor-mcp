@@ -1,8 +1,16 @@
 import { randomUUID } from 'node:crypto';
 
+/** Where a Cursor control-plane call failed: the RPC name and, for an HTTP rejection, its status. Never a URL or a body. */
+export interface FailureDetail { httpStatus?: number; operation?: string }
 export class TerminalFailure extends Error {
-  constructor(readonly code: string, readonly submitted = false) { super(code); }
+  constructor(readonly code: string, readonly submitted = false, readonly detail: FailureDetail = {}) { super(code); }
 }
+/** Result fields a failure adds beside its code. The code and `submitted` keep their existing meanings. */
+export const failureFields = (error: unknown): { httpStatus?: number; failedOperation?: string } => {
+  if (!(error instanceof TerminalFailure)) return {};
+  return { ...(error.detail.httpStatus !== undefined ? { httpStatus: error.detail.httpStatus } : {}),
+    ...(error.detail.operation ? { failedOperation: error.detail.operation } : {}) };
+};
 export const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -188,20 +196,25 @@ export class CursorTerminalConnector implements TerminalConnector {
 
   private async post(path: string, token: string, input: Record<string, unknown>, signal?: AbortSignal, mutation = false) {
     if (signal?.aborted) throw new TerminalFailure('request_cancelled');
+    // The RPC name is fixed vocabulary from the path; it carries no identifier, token, or body.
+    const operation = path.slice(path.lastIndexOf('/') + 1);
     let response: Response;
     try {
       response = await this.fetcher(`https://api2.cursor.sh${path}`, { method: 'POST', redirect: 'error',
         headers: { 'content-type': 'application/json', 'connect-protocol-version': '1', 'x-cursor-client-type': 'cli', authorization: `Bearer ${token}` },
         body: JSON.stringify(input), signal: AbortSignal.any([AbortSignal.timeout(10000), ...(signal ? [signal] : [])]) });
-    } catch { throw new TerminalFailure(signal?.aborted ? 'request_cancelled' : 'terminal_connection_failed', mutation); }
+    } catch { throw new TerminalFailure(signal?.aborted ? 'request_cancelled' : 'terminal_connection_failed', mutation, { operation }); }
     if (response.status === 401 || response.status === 403) {
       this.token = undefined;
-      throw new TerminalFailure(response.status === 401 ? 'terminal_authentication_expired' : 'terminal_permission_denied');
+      throw new TerminalFailure(response.status === 401 ? 'terminal_authentication_expired' : 'terminal_permission_denied', false,
+        { httpStatus: response.status, operation });
     }
-    if (!response.ok) throw new TerminalFailure(response.status === 404 ? 'machine_unavailable' : 'terminal_connection_failed', mutation);
+    // Every other rejection keeps its code; the status tells a 429 from a 503 from a dropped connection.
+    if (!response.ok) throw new TerminalFailure(response.status === 404 ? 'machine_unavailable' : 'terminal_connection_failed', mutation,
+      { httpStatus: response.status, operation });
     let value: unknown;
-    try { value = await response.json(); } catch { throw new TerminalFailure('invalid_machine_response', mutation); }
-    if (!object(value)) throw new TerminalFailure('invalid_machine_response', mutation);
+    try { value = await response.json(); } catch { throw new TerminalFailure('invalid_machine_response', mutation, { operation }); }
+    if (!object(value)) throw new TerminalFailure('invalid_machine_response', mutation, { operation });
     return value;
   }
 
