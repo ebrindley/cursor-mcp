@@ -132,7 +132,7 @@ See the [first-task guide][first-task] for examples and resuming after a restart
 
 ## Documentation
 
-- [Cloud Agent VM terminal](docs/terminal.md): command execution and interactive sessions without a Cursor IDE dependency.
+- [Cloud Agent VM terminal](docs/terminal.md): command execution, interactive sessions, and detached long-running jobs without a Cursor IDE dependency.
 
 - [Client configuration, custom policies, diagnostics, and updates][setup]
 - [First task, follow-ups, recovery, and examples][first-task]

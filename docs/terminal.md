@@ -31,11 +31,17 @@ Completion comes from `PtyExited`, including its exit code or termination signal
 
 Authentication exchanges the configured API key and discovers the selected VM, keeping returned credentials in memory. Tokens and credential-bearing gateway URLs are excluded from tool results and errors. A failed capability check reports its failure; there is no IDE or inference fallback. Status checks availability and does not intentionally request a wake.
 
+Implementation tests cover the independent transport and result contract. Live verification must start with Cursor IDE exited and use an existing VM; offline tests cannot establish account admission.
+
+## Long-running and detached work
+
+A disposable execute command has a 30-second default `timeoutMs` and a 300-second maximum; heartbeats and keepalives keep a stream attached and do not extend either bound.
+
 For jobs that must outlive the local MCP process, use a caller-owned detached tmux session and save output and the workload's exit status to VM files. After restarting MCP, discover the same target and use a fresh command to inspect those files; this recovers job results, not the old terminal handles or command-ID deduplication state. Initialize any required toolchain paths explicitly because startup profiles are disabled. Files written under `/opt/cursor/artifacts` can be listed with `cursor_list_artifacts` and downloaded using `cursor_get_artifact_url`; use the exact path returned by the listing. Download required results while access works, and clean up only files and sessions owned by your job. Neither tmux nor VM-local files guarantee survival of machine loss.
 
 On 2026-09-16, probes observed an AttachPty WebSocket closing after approximately 60 seconds without frames in either direction (abnormal closure 1006) while the VM, PTY, and process remained healthy. While a streaming request is pending, Cursor MCP sends ListPtys on the same socket after 20 idle seconds to prevent this observed idle drop. Keepalive failures are ignored; this is not a connection-health check or a Cursor timing or availability guarantee. Keepalives do not extend command deadlines or preserve MCP-local handles and output across restart. Stream-loss cleanup is unchanged.
 
-Implementation tests cover the independent transport and result contract. Live verification must start with Cursor IDE exited and use an existing VM; offline tests cannot establish account admission.
+This server does not create or manage tmux sessions; the reasoning and the conditions for revisiting it are recorded in `.poetic/planning/tmux-durability-decision.md`.
 
 ## Interactive sessions
 

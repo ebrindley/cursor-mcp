@@ -128,7 +128,11 @@ test('terminal config is opt-in, unknown keys fail, and execute/cancel use their
 
 test('real MCP validates source and emits sanitized terminal output and identifiers in both text and structured content', async () => {
   const calls: unknown[] = [];
-  const backend = { handle: async (input: unknown) => { calls.push(input); return { status: 'command', state: 'finished', sessionId: '11111111-1111-4111-8111-111111111111', commandId: 'one', output: '\u001b[31mUNIQUE_PAYLOAD', outputTruncated: true, exitCode: 7 }; }, close() {} };
+  let lost = false;
+  const backend = { handle: async (input: unknown) => { calls.push(input); return lost
+    ? { status: 'command', state: 'finished', sessionId: '11111111-1111-4111-8111-111111111111', commandId: 'two', commandOutcome: 'unknown', exitCode: null,
+      reason: 'stream_ended_without_exit', cleanup: 'process_not_listed', outputReadFailed: true, outputOffset: 0, outputLength: 0, output: '' }
+    : { status: 'command', state: 'finished', sessionId: '11111111-1111-4111-8111-111111111111', commandId: 'one', output: '\u001b[31mUNIQUE_PAYLOAD', outputTruncated: true, exitCode: 7 }; }, close() {} };
   const server = new McpServer({ name: 'fixture', version: '1' });
   registerTerminalTools(server, PolicySchema.parse({ deleteEnabled: true, terminal: { agentId: 'bc-test', executeEnabled: true },
     defaultProfile: 'terminal', profiles: { terminal: { tools: ['cursor_terminal_status', 'cursor_terminal_execute', 'cursor_terminal_read'] } } }), '', backend);
@@ -152,6 +156,15 @@ test('real MCP validates source and emits sanitized terminal output and identifi
     expect(text).toContain('"sessionId":"11111111-1111-4111-8111-111111111111"');
     expect(text).toContain('"commandId":"one"');
     expect(JSON.stringify(result)).not.toContain('u001b'); expect(calls).toHaveLength(1);
+    // A completed command needs no recovery advice; a lost output stream carries it in both places.
+    expect(result.structuredContent).not.toHaveProperty('hint'); expect(text).not.toContain('hint');
+    lost = true;
+    const failed = await client.callTool({ name: 'cursor_terminal_execute', arguments: { ...args, commandId: 'two', command: 'sleep 1' } });
+    expect(failed.structuredContent).toMatchObject({ outputReadFailed: true, commandOutcome: 'unknown', exitCode: null,
+      hint: 'Output stream failed; see reason and cleanup. Do not resubmit uncertain work. For future jobs needing results after MCP restart, use caller-owned detached tmux with output and exit-status files, polled by short commands.' });
+    const failedText = (failed.content as Array<{ type: string; text: string }>).map(block => block.text).join('\n');
+    expect(failedText).toContain('"hint":"Output stream failed; see reason and cleanup.');
+    expect(failedText).toContain('caller-owned detached tmux with output and exit-status files, polled by short commands.');
   } finally { await client.close(); await server.close(); }
 });
 
@@ -411,5 +424,19 @@ test('profile wake checks scope before admission, validates wait and retains res
     await client.callTool({ name: 'cursor_terminal_wake', arguments: { agentId: 'bc-test' } });
     expect(await f.service.handle(f.request('read'))).toEqual(retained);
     expect(f.calls.filter(x => x === 'SpawnPty')).toHaveLength(1);
+  } finally { await client.close(); await server.close(); }
+});
+
+test('execute and session_create descriptions name the detached-job recipe and the restart loss', async () => {
+  const server = new McpServer({ name: 'fixture', version: '1' });
+  registerTerminalTools(server, PolicySchema.parse({ deleteEnabled: true, terminal: { agentId: 'bc-test', executeEnabled: true },
+    defaultProfile: 'terminal', profiles: { terminal: { tools: ['*'] } } }));
+  const client = new Client({ name: 'fixture-client', version: '1' });
+  const [ct, st] = InMemoryTransport.createLinkedPair(); await server.connect(st); await client.connect(ct);
+  try {
+    const list = await client.listTools();
+    const description = (name: string) => list.tools.find(x => x.name === name)?.description ?? '';
+    expect(description('cursor_terminal_execute')).toContain("For jobs exceeding timeoutMs or needing recoverable results after MCP restart, use caller-owned detached tmux with output and the workload's exit status in VM files, polled by short commands.");
+    expect(description('cursor_terminal_session_create')).toContain('No command deadline; handles and retained output are lost on MCP restart, while the shell may keep running.');
   } finally { await client.close(); await server.close(); }
 });
