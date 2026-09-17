@@ -9,7 +9,11 @@ class Socket extends EventTarget {
   readyState = 0;
   sent: Record<string, unknown>[] = [];
   respond: (frame: Record<string, unknown>) => void = () => {};
-  constructor() { super(); queueMicrotask(() => { this.readyState = 1; this.dispatchEvent(new Event('open')); }); }
+  constructor(openAfterMs = 0) {
+    super();
+    const open = () => { this.readyState = 1; this.dispatchEvent(new Event('open')); };
+    if (openAfterMs) setTimeout(open, openAfterMs); else queueMicrotask(open);
+  }
   send(text: string) { const f = JSON.parse(text); this.sent.push(f); if (f.type === 1) this.respond(f); }
   frame(value: unknown) { this.dispatchEvent(Object.assign(new Event('message'), { data: JSON.stringify(value) })); }
   close() { if (this.readyState === 3) return; this.readyState = 3; this.dispatchEvent(new Event('close')); }
@@ -19,11 +23,12 @@ class Socket extends EventTarget {
     this.frame({ type: 5, requestId: id, trailers: {} });
   }
 }
-function fixture(timeout = 1000) {
+function fixture(timeout = 1000, keepaliveMs = 0) { // Keepalives stay off unless a case exercises them.
   let socket!: Socket;
-  const gateway = new TerminalGateway(pod, () => { socket = new Socket(); return socket as unknown as WebSocket; }, timeout);
+  const gateway = new TerminalGateway(pod, () => { socket = new Socket(); return socket as unknown as WebSocket; }, timeout, undefined, keepaliveMs);
   return { gateway, socket: () => socket };
 }
+const listPtys = (socket: Socket) => socket.sent.filter(frame => frame.type === 1 && String(frame.path).endsWith('/ListPtys'));
 
 test('JSON unary request uses exact service route, accepts an empty default response and closes cleanly', async () => {
   const f = fixture();
@@ -179,4 +184,90 @@ test.each(['auth', 'discovery', 'opening', 'rpc'] as const)('probe cancellation 
   expect(failure).toBeInstanceOf(TerminalFailure);
   peer?.close();
   for (const socket of sockets) expect(socket.readyState).toBe(3);
+});
+
+test('an idle stream is kept warm by one ListPtys, a received frame restarts the interval, and settling ends keepalives', async () => {
+  vi.useFakeTimers();
+  try {
+    const f = fixture(10000, 20000), controller = new AbortController(), events: unknown[] = [];
+    const result = f.gateway.stream('AttachPty', { ptyId: 'owned' }, event => events.push(event), controller.signal);
+    const socket = f.socket();
+    let id = '';
+    socket.respond = frame => {
+      if (String(frame.path).endsWith('/ListPtys')) socket.reply(frame.requestId);
+      else { id = String(frame.requestId); socket.frame({ type: 4, requestId: id, status: 200 }); }
+    };
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(listPtys(socket)).toHaveLength(0);
+    socket.frame({ type: 3, requestId: id, body: encode({ ptyData: { data: '' } }).toString('base64') });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(events).toHaveLength(1); expect(listPtys(socket)).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(socket.sent[1]).toMatchObject({ type: 1, path: '/agent.v1.PtyHostService/ListPtys', headers: { 'content-type': 'application/json' } });
+    expect(listPtys(socket)).toHaveLength(1);
+    socket.frame({ type: 3, requestId: id, body: Buffer.concat([encode({ ptyExited: { exitCode: 0 } }), encode({}, 2)]).toString('base64') });
+    socket.frame({ type: 5, requestId: id, trailers: {} });
+    await result; expect(events).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(listPtys(socket)).toHaveLength(1); f.gateway.close();
+  } finally { vi.useRealTimers(); }
+});
+
+test('an unanswered keepalive times out on its own and leaves its stream to finish', async () => {
+  vi.useFakeTimers();
+  try {
+    const f = fixture(10000, 20000), controller = new AbortController(), events: unknown[] = [];
+    const result = f.gateway.stream('AttachPty', { ptyId: 'owned' }, event => events.push(event), controller.signal);
+    const socket = f.socket();
+    let id = '';
+    socket.respond = frame => { // The stream is answered; the keepalive gets no reply at all.
+      if (String(frame.path).endsWith('/AttachPty')) { id = String(frame.requestId); socket.frame({ type: 4, requestId: id, status: 200 }); }
+    };
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(listPtys(socket)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(socket.sent.filter(frame => frame.type === 2)).toEqual([{ type: 2, requestId: listPtys(socket)[0]!.requestId }]);
+    socket.frame({ type: 3, requestId: id, body: Buffer.concat([encode({ ptyData: { data: '' } }), encode({}, 2)]).toString('base64') });
+    socket.frame({ type: 5, requestId: id, trailers: {} });
+    await result; expect(events).toHaveLength(1); expect(listPtys(socket)).toHaveLength(1);
+    f.gateway.close();
+  } finally { vi.useRealTimers(); }
+});
+
+test('keepalives need a live socket with a pending stream, so unary-only work, a closed gateway, and a replaced socket get none', async () => {
+  vi.useFakeTimers();
+  try {
+    const quiet = fixture(10000, 20000); // Unary-only traffic is never kept warm.
+    const read = quiet.gateway.unary('ListPtys', {});
+    quiet.socket().respond = frame => quiet.socket().reply(frame.requestId);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(await read).toEqual({}); expect(quiet.socket().sent).toHaveLength(1); quiet.gateway.close();
+
+    const closed = fixture(10000, 20000); // close() disarms a keepalive that is already armed.
+    const detached = closed.gateway.stream('AttachPty', { ptyId: 'owned' }, () => {}, new AbortController().signal).catch(error => error);
+    const armed = closed.socket();
+    armed.respond = frame => armed.frame({ type: 4, requestId: frame.requestId, status: 200 });
+    await vi.advanceTimersByTimeAsync(19000);
+    closed.gateway.close();
+    expect(await detached).toMatchObject({ code: 'terminal_closed' });
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(listPtys(armed)).toHaveLength(0);
+
+    const sockets: Socket[] = []; // A silently lost socket's timer cannot keepalive the socket that replaced it.
+    const gateway = new TerminalGateway(pod, () => {
+      const socket = new Socket(sockets.length ? 5000 : 0); sockets.push(socket); return socket as unknown as WebSocket;
+    }, 10000, undefined, 20000);
+    const stranded = gateway.stream('AttachPty', { ptyId: 'owned' }, () => {}, new AbortController().signal).catch(error => error);
+    const [old] = sockets as [Socket];
+    old.respond = frame => old.frame({ type: 4, requestId: frame.requestId, status: 200 });
+    await vi.advanceTimersByTimeAsync(19000);
+    old.readyState = 2; // Closing, with no close event delivered yet.
+    const reopened = gateway.unary('ListPtys', {});
+    const replacement = sockets[1]!;
+    replacement.respond = frame => replacement.reply(frame.requestId);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(await reopened).toEqual({});
+    expect(listPtys(old)).toHaveLength(0); expect(listPtys(replacement)).toHaveLength(1);
+    gateway.close(); expect(await stranded).toMatchObject({ code: 'terminal_closed' });
+  } finally { vi.useRealTimers(); }
 });

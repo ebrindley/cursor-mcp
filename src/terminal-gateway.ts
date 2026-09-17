@@ -21,9 +21,10 @@ export class TerminalGateway implements TerminalPeer {
   private disposed = false;
   private failOpening: (() => void) | undefined;
   private readonly abort = () => this.close();
-  private readonly pending = new Map<string, { socket: WebSocket; frame: (value: Record<string, unknown>) => void; fail: (code: string) => void }>();
+  private readonly pending = new Map<string, { socket: WebSocket; streaming: boolean; frame: (value: Record<string, unknown>) => void; fail: (code: string) => void }>();
+  private keepalive: ReturnType<typeof setTimeout> | undefined;
   constructor(private readonly pod: Pod, private readonly socketFactory: SocketFactory = url => new WebSocket(url),
-    private readonly requestTimeoutMs = 10000, private readonly signal?: AbortSignal) {
+    private readonly requestTimeoutMs = 10000, private readonly signal?: AbortSignal, private readonly keepaliveMs = 20000) {
     signal?.addEventListener('abort', this.abort, { once: true });
     if (signal?.aborted) this.close();
   }
@@ -50,12 +51,14 @@ export class TerminalGateway implements TerminalPeer {
         clearTimeout(timer);
         if (!opened) reject(new TerminalFailure('gateway_unavailable'));
         for (const request of [...this.pending.values()]) if (request.socket === socket) request.fail('gateway_disconnected');
+        this.rearm(socket);
       };
       this.failOpening = failed;
       socket.addEventListener('open', () => { opened = true; clearTimeout(timer); resolve(socket); }, { once: true });
       socket.addEventListener('error', failed);
       socket.addEventListener('close', failed);
       socket.addEventListener('message', event => {
+        this.rearm(socket);
         try {
           if (typeof event.data !== 'string' || Buffer.byteLength(event.data) > 2 * 1024 * 1024) throw new Error();
           const frame: unknown = JSON.parse(event.data);
@@ -69,6 +72,22 @@ export class TerminalGateway implements TerminalPeer {
       });
     }).finally(() => { this.opening = undefined; this.failOpening = undefined; });
     return this.opening;
+  }
+
+  private streams(socket: WebSocket) { return [...this.pending.values()].some(request => request.socket === socket && request.streaming); }
+  /** The pod gateway closed a socket idle in both directions for ~60s even with an AttachPty pending (observed 2026-09-16), so an
+   *  idle unary keeps the current socket warm. Keepalive failures are ignored: this prevents that drop, it is not a liveness check. */
+  private rearm(socket: WebSocket | undefined = this.socket) {
+    if (this.socket !== socket) return;
+    clearTimeout(this.keepalive); this.keepalive = undefined;
+    if (!socket || this.disposed || !this.keepaliveMs || socket.readyState !== 1 || !this.streams(socket)) return;
+    const timer = setTimeout(() => {
+      this.keepalive = undefined;
+      if (this.disposed || this.socket !== socket || socket.readyState !== 1 || !this.streams(socket)) return;
+      void this.unary('ListPtys', {}).catch(() => { /* Its send re-arms the timer; a keepalive failure says nothing about the stream. */ });
+    }, this.keepaliveMs);
+    timer.unref?.();
+    this.keepalive = timer;
   }
 
   private async request(method: string, input: Record<string, unknown>, event?: (value: Record<string, unknown>) => void,
@@ -86,7 +105,7 @@ export class TerminalGateway implements TerminalPeer {
       let buffer = Buffer.alloc(0);
       let streamEnded = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const cleanup = () => { this.pending.delete(requestId); clearTimeout(timer); signal?.removeEventListener('abort', abort); };
+      const cleanup = () => { this.pending.delete(requestId); clearTimeout(timer); signal?.removeEventListener('abort', abort); this.rearm(socket); };
       const cancelRequest = () => {
         if (socket.readyState === 1 && sent) try { socket.send(JSON.stringify({ type: 2, requestId })); } catch { /* no replay */ }
       };
@@ -95,7 +114,7 @@ export class TerminalGateway implements TerminalPeer {
         settled = true; cleanup(); cancelRequest(); reject(new TerminalFailure(code, sent));
       };
       const abort = () => fail('request_cancelled');
-      this.pending.set(requestId, { socket, fail, frame: frame => {
+      this.pending.set(requestId, { socket, streaming, fail, frame: frame => {
         if (settled) return;
         try {
           if (frame.type === 4) {
@@ -135,6 +154,7 @@ export class TerminalGateway implements TerminalPeer {
         socket.send(JSON.stringify({ type: 1, requestId, path: `/agent.v1.PtyHostService/${method}`, method: 'POST',
           headers: { 'content-type': streaming ? 'application/connect+json' : 'application/json',
             'connect-protocol-version': '1', authorization: `Bearer ${this.pod.ptyAuthToken}` }, body: body.toString('base64') }));
+        this.rearm(socket);
       } catch { fail('gateway_send_failed'); }
     });
   }
@@ -145,6 +165,7 @@ export class TerminalGateway implements TerminalPeer {
   }
   close() {
     this.disposed = true;
+    this.rearm();
     this.signal?.removeEventListener('abort', this.abort);
     this.failOpening?.();
     for (const request of [...this.pending.values()]) request.fail('terminal_closed');
