@@ -9,39 +9,57 @@ import { registerTerminalTools } from '../src/tools/terminal.js';
 
 function fixture(maxBytes = 65536, maxResults = 32) {
   const calls: string[] = [];
+  const attachments: Record<string, unknown>[] = [];
+  const peers: { closed: boolean }[] = [];
+  const connectFailures: string[] = [];
   let rejectStream: ((error: Error) => void) | undefined;
+  let endStream: (() => void) | undefined;
   let listener: ((event: Record<string, unknown>) => void) | undefined;
   let present = false;
   let failSpawn = false;
   let changed = false;
   let cleanupFails = false;
-  const peer: TerminalPeer = {
-    async unary(method, _input, submitted) {
-      calls.push(method);
-      if (method === 'SpawnPty') { submitted?.(); present = true; if (failSpawn) throw new TerminalFailure('gateway_disconnected', true); return { ptyId: 'owned' }; }
-      if (cleanupFails) throw new TerminalFailure('gateway_disconnected');
-      if (method === 'TerminatePty') { present = false; return { success: true }; }
-      return { ptys: present ? [{ ptyId: 'owned' }] : [] };
-    },
-    stream(_method, _input, event, signal) {
-      listener = event;
-      return new Promise<void>((_resolve, reject) => { rejectStream = reject; signal.addEventListener('abort', () => reject(new TerminalFailure('request_cancelled')), { once: true }); });
-    },
-    close() {},
+  let holdNext = false;
+  let releaseConnect: (() => void) | undefined;
+  // Each connect returns its own peer, as the real connector does, so a superseded one is visible.
+  const newPeer = () => {
+    const state = { closed: false };
+    peers.push(state);
+    const peer: TerminalPeer = {
+      async unary(method, _input, submitted) {
+        calls.push(method);
+        if (method === 'SpawnPty') { submitted?.(); present = true; if (failSpawn) throw new TerminalFailure('gateway_disconnected', true); return { ptyId: 'owned' }; }
+        if (cleanupFails) throw new TerminalFailure('gateway_disconnected');
+        if (method === 'TerminatePty') { present = false; return { success: true }; }
+        return { ptys: present ? [{ ptyId: 'owned' }] : [] };
+      },
+      stream(_method, input, event, signal) {
+        attachments.push(input); listener = event;
+        return new Promise<void>((resolve, reject) => { rejectStream = reject; endStream = resolve; signal.addEventListener('abort', () => reject(new TerminalFailure('request_cancelled')), { once: true }); });
+      },
+      close() { state.closed = true; },
+    };
+    return peer;
   };
   const connector: TerminalConnector = { async connect(expected) {
+    if (holdNext) { holdNext = false; await new Promise<void>(resolve => { releaseConnect = resolve; }); }
+    if (connectFailures.length) throw new TerminalFailure(connectFailures.shift()!);
     if (changed && expected) throw new TerminalFailure('machine_changed');
-    return { machineId: 'machine-1', peer };
+    return { machineId: 'machine-1', peer: newPeer() };
   } };
   const service = new TerminalService('bc-test', connector, maxBytes, maxResults);
   const request = (operation: string, commandId = 'one') => ({ operation, sessionId: service.sessionId, commandId, command: "printf 'x\ty'\nexit 7", timeoutMs: 10000 });
-  return { service, calls, request,
+  return { service, calls, request, attachments, peers,
     event: (event: Record<string, unknown>) => listener!(event),
-    breakStream: () => rejectStream!(new TerminalFailure('gateway_disconnected')),
+    breakStream: (code = 'gateway_disconnected') => rejectStream!(new TerminalFailure(code)),
+    endStream: () => endStream!(),
+    failConnect: (...codes: string[]) => connectFailures.push(...codes),
+    holdConnect: () => { holdNext = true; }, connectHeld: () => releaseConnect !== undefined, releaseConnect: () => releaseConnect!(),
     failSpawn: () => { failSpawn = true; }, changeMachine: () => { changed = true; }, failCleanup: () => { cleanupFails = true; }, recoverCleanup: () => { cleanupFails = false; },
     async started() { await vi.waitFor(() => expect(listener).toBeTypeOf('function')); },
-    data(data: Buffer) { listener!({ ptyData: { data: data.toString('base64') } }); },
-    exit(code = 7) { present = false; listener!({ ptyExited: code ? { exitCode: code } : {} }); },
+    async attached(count: number) { await vi.waitFor(() => expect(attachments).toHaveLength(count)); },
+    data(data: Buffer, eventId?: string) { listener!({ ...(eventId ? { eventId } : {}), ptyData: { data: data.toString('base64') } }); },
+    exit(code = 7, eventId?: string) { present = false; listener!({ ...(eventId ? { eventId } : {}), ptyExited: code ? { exitCode: code } : {} }); },
     async finished(id = 'one') {
       let result: Record<string, unknown> = {};
       await vi.waitFor(async () => { result = await service.handle(request('read', id)); expect(result.state).toBe('finished'); });
@@ -131,7 +149,8 @@ test('real MCP validates source and emits sanitized terminal output and identifi
   let lost = false;
   const backend = { handle: async (input: unknown) => { calls.push(input); return lost
     ? { status: 'command', state: 'finished', sessionId: '11111111-1111-4111-8111-111111111111', commandId: 'two', commandOutcome: 'unknown', exitCode: null,
-      reason: 'stream_ended_without_exit', cleanup: 'process_not_listed', outputReadFailed: true, outputOffset: 0, outputLength: 0, output: '' }
+      reason: 'stream_ended_without_exit', cleanup: 'process_not_listed', outputReadFailed: true, reattachments: 3,
+      continuityUncertain: true, outputOffset: 0, outputLength: 0, output: '' }
     : { status: 'command', state: 'finished', sessionId: '11111111-1111-4111-8111-111111111111', commandId: 'one', output: '\u001b[31mUNIQUE_PAYLOAD', outputTruncated: true, exitCode: 7 }; }, close() {} };
   const server = new McpServer({ name: 'fixture', version: '1' });
   registerTerminalTools(server, PolicySchema.parse({ deleteEnabled: true, terminal: { agentId: 'bc-test', executeEnabled: true },
@@ -163,6 +182,7 @@ test('real MCP validates source and emits sanitized terminal output and identifi
     expect(failed.structuredContent).toMatchObject({ outputReadFailed: true, commandOutcome: 'unknown', exitCode: null,
       hint: 'Output stream failed; see reason and cleanup. Do not resubmit uncertain work. For future jobs needing results after MCP restart, use caller-owned detached tmux with output and exit-status files, polled by short commands.' });
     const failedText = (failed.content as Array<{ type: string; text: string }>).map(block => block.text).join('\n');
+    expect(failedText).toContain('"reattachments":3'); expect(failedText).toContain('"continuityUncertain":true');
     expect(failedText).toContain('"hint":"Output stream failed; see reason and cleanup.');
     expect(failedText).toContain('caller-owned detached tmux with output and exit-status files, polled by short commands.');
   } finally { await client.close(); await server.close(); }
@@ -319,10 +339,139 @@ test('empty and unknown PTY events do not interrupt output or completion', async
   expect(f.calls).not.toContain('TerminatePty'); f.service.close();
 });
 
-test('output stream loss preserves unknown outcome and checks owned-process cleanup', async () => {
-  const f = fixture(); await f.service.handle(f.request('execute')); await f.started(); f.breakStream();
-  expect(await f.finished()).toMatchObject({ outputReadFailed: true, commandOutcome: 'unknown', exitCode: null, cleanup: 'process_not_listed' });
+test.each([['no events', false], ['an event without an id', true]])('stream loss after %s preserves unknown outcome and checks owned-process cleanup', async (_case, idless) => {
+  const f = fixture(); await f.service.handle(f.request('execute')); await f.started();
+  if (idless) f.data(Buffer.from('no cursor'));
+  f.breakStream();
+  expect(await f.finished()).toMatchObject({ outputReadFailed: true, commandOutcome: 'unknown', exitCode: null,
+    cleanup: 'process_not_listed', reattachments: 0, continuityUncertain: false });
+  expect(f.attachments).toHaveLength(1);
   expect(f.calls).toContain('TerminatePty'); f.service.close();
+});
+
+test('a lost stream reattaches from its cursor and still reports the real exit', async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  try {
+    await f.service.handle({ ...f.request('execute'), timeoutMs: 300000 }); await f.started();
+    f.data(Buffer.from('one'), 'owned-1'); f.data(Buffer.from('two'), 'owned-2'); f.breakStream();
+    await vi.advanceTimersByTimeAsync(1000); await f.attached(2);
+    expect(f.attachments.at(-1)).toEqual({ ptyId: 'owned', lastEventId: 'owned-2' });
+    f.data(Buffer.from('three'), 'owned-3'); f.exit(7, 'owned-4');
+    expect(await f.finished()).toMatchObject({ output: 'onetwothree', exitCode: 7, commandOutcome: 'ended', outputComplete: true,
+      outputReadFailed: false, reattachments: 1, continuityUncertain: false, cleanup: 'process_exited' });
+    expect(f.calls).not.toContain('TerminatePty');
+    expect(f.peers.every(peer => peer.closed)).toBe(true);
+  } finally { vi.useRealTimers(); f.service.close(); }
+});
+
+// Replay is exclusive of the cursor, an unknown cursor replays the whole history, and a gap is only reported.
+test.each([
+  { replay: ['owned-3'], exit: 'owned-4', uncertain: false },
+  { replay: ['owned-1', 'owned-2', 'owned-3'], exit: 'owned-4', uncertain: false },
+  { replay: ['owned-9'], exit: 'owned-10', uncertain: true },
+])('a reattached stream deduplicates its replay (continuity uncertain: $uncertain)', async ({ replay, exit, uncertain }) => {
+  vi.useFakeTimers();
+  const f = fixture();
+  try {
+    await f.service.handle({ ...f.request('execute'), timeoutMs: 300000 }); await f.started();
+    f.data(Buffer.from('one'), 'owned-1'); f.data(Buffer.from('two'), 'owned-2'); f.breakStream();
+    await vi.advanceTimersByTimeAsync(1000); await f.attached(2);
+    for (const eventId of replay) f.data(Buffer.from(eventId === 'owned-1' ? 'one' : eventId === 'owned-2' ? 'two' : 'three'), eventId);
+    f.exit(7, exit);
+    expect(await f.finished()).toMatchObject({ output: 'onetwothree', exitCode: 7, outputReadFailed: false,
+      reattachments: 1, continuityUncertain: uncertain, cleanup: 'process_exited' });
+  } finally { vi.useRealTimers(); f.service.close(); }
+});
+
+test('output at the retention cap still advances the resume cursor', async () => {
+  vi.useFakeTimers();
+  const f = fixture(4);
+  try {
+    await f.service.handle({ ...f.request('execute'), timeoutMs: 300000 }); await f.started();
+    f.data(Buffer.from('abcd'), 'owned-1'); f.data(Buffer.from('efgh'), 'owned-2'); f.breakStream();
+    await vi.advanceTimersByTimeAsync(1000); await f.attached(2);
+    expect(f.attachments.at(-1)).toEqual({ ptyId: 'owned', lastEventId: 'owned-2' });
+    f.exit(0, 'owned-3');
+    expect(await f.finished()).toMatchObject({ output: 'abcd', outputTruncated: true, exitCode: 0, outputComplete: true,
+      reattachments: 1, continuityUncertain: false, cleanup: 'process_exited' });
+  } finally { vi.useRealTimers(); f.service.close(); }
+});
+
+test('a transport connect failure consumes one attempt and the next one reattaches', async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  try {
+    await f.service.handle({ ...f.request('execute'), timeoutMs: 300000 }); await f.started();
+    f.data(Buffer.from('partial'), 'owned-1'); f.failConnect('gateway_unavailable'); f.breakStream();
+    await vi.advanceTimersByTimeAsync(1000); await vi.advanceTimersByTimeAsync(2000); await f.attached(2);
+    expect(f.attachments.at(-1)).toEqual({ ptyId: 'owned', lastEventId: 'owned-1' });
+    f.exit(0, 'owned-2');
+    expect(await f.finished()).toMatchObject({ exitCode: 0, outputReadFailed: false, reattachments: 2,
+      continuityUncertain: false, cleanup: 'process_exited' });
+  } finally { vi.useRealTimers(); f.service.close(); }
+});
+
+// A reaped PTY, a protocol violation and a replacement machine are outcomes, not transport noise.
+test.each([
+  { loss: 'terminal_stream_error', changed: false, attempts: 0, cleanup: 'process_not_listed' },
+  { loss: 'invalid_gateway_response', changed: false, attempts: 0, cleanup: 'process_not_listed' },
+  { loss: 'gateway_disconnected', changed: true, attempts: 1, cleanup: 'machine_changed' },
+])('a non-transport failure ($loss) keeps the unknown outcome and its existing cleanup', async ({ loss, changed, attempts, cleanup }) => {
+  vi.useFakeTimers();
+  const f = fixture();
+  try {
+    await f.service.handle({ ...f.request('execute'), timeoutMs: 300000 }); await f.started();
+    f.data(Buffer.from('partial'), 'owned-1');
+    if (changed) f.changeMachine();
+    f.breakStream(loss);
+    if (attempts) await vi.advanceTimersByTimeAsync(1000);
+    expect(await f.finished()).toMatchObject({ output: 'partial', outputReadFailed: true, commandOutcome: 'unknown',
+      exitCode: null, reason: 'output_read_failed', reattachments: attempts, continuityUncertain: false, cleanup });
+    expect(f.attachments).toHaveLength(1);
+    expect(f.calls.includes('TerminatePty')).toBe(!changed);
+  } finally { vi.useRealTimers(); f.service.close(); }
+});
+
+test('three transport failures exhaust the budget and fall back to the unknown outcome', async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  try {
+    await f.service.handle({ ...f.request('execute'), timeoutMs: 300000 }); await f.started();
+    f.data(Buffer.from('partial'), 'owned-1'); f.failConnect('terminal_connection_failed'); f.breakStream();
+    await vi.advanceTimersByTimeAsync(1000); await vi.advanceTimersByTimeAsync(2000); await f.attached(2);
+    f.breakStream('gateway_send_failed');
+    await vi.advanceTimersByTimeAsync(4000); await f.attached(3);
+    f.endStream();
+    expect(await f.finished()).toMatchObject({ output: 'partial', outputReadFailed: true, commandOutcome: 'unknown',
+      exitCode: null, reason: 'stream_ended_without_exit', reattachments: 3, cleanup: 'process_not_listed' });
+    expect(f.attachments.map(input => input.lastEventId)).toEqual([undefined, 'owned-1', 'owned-1']);
+    expect(f.calls).toContain('TerminatePty');
+    expect(f.peers.every(peer => peer.closed)).toBe(true);
+  } finally { vi.useRealTimers(); f.service.close(); }
+});
+
+test.each(['backoff', 'connect', 'deadline'] as const)('%s interruption installs no late attachment and releases the command once', async mode => {
+  vi.useFakeTimers();
+  const f = fixture();
+  try {
+    await f.service.handle({ ...f.request('execute'), timeoutMs: mode === 'deadline' ? 2000 : 300000 }); await f.started();
+    f.data(Buffer.from('partial'), 'owned-1');
+    if (mode !== 'backoff') f.holdConnect();
+    f.breakStream();
+    if (mode === 'backoff') await vi.advanceTimersByTimeAsync(500);
+    else { await vi.advanceTimersByTimeAsync(1000); await vi.waitFor(() => expect(f.connectHeld()).toBe(true)); }
+    if (mode === 'deadline') await vi.advanceTimersByTimeAsync(2000);
+    else await f.service.handle(f.request('cancel'));
+    if (mode !== 'backoff') f.releaseConnect();
+    expect(await f.finished()).toMatchObject({ output: 'partial', commandOutcome: 'unknown', exitCode: null,
+      outputReadFailed: false, reattachments: 1, cleanup: 'process_not_listed',
+      reason: mode === 'deadline' ? 'deadline_exceeded' : 'cancel_requested' });
+    expect(f.attachments).toHaveLength(1);
+    expect(f.service.retention.activeCommandId).toBeNull();
+    expect(f.calls.filter(call => call === 'TerminatePty')).toHaveLength(1);
+    expect(f.peers.every(peer => peer.closed)).toBe(true);
+  } finally { vi.useRealTimers(); f.service.close(); }
 });
 
  test('explicit cancel retries only unresolved cleanup after connectivity returns', async () => {

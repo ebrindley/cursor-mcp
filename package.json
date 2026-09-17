@@ -1,6 +1,6 @@
 {
   "name": "@ebrindley/cursor-mcp",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "MCP server exposing the Cursor Cloud Agents v1 API to Claude Code, Codex, Grok, and Cursor",
   "type": "module",
   "license": "MIT",

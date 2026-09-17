@@ -71,7 +71,7 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
       'maxTargets', 'retainedTargets', 'targetOffset', 'targetNextOffset', 'state', 'commandOutcome', 'exitCode', 'signal', 'reason', 'cleanup', 'outputComplete',
       'outputReadFailed', 'outputTruncated', 'outputOffset', 'outputNextOffset', 'outputLength',
       'outputStartOffset', 'outputEndOffset', 'outputGap', 'reconnectGapPossible', 'inputOutcome', 'nextInputSequence', 'remoteOutcome', 'bytes', 'maxBytes',
-      'wakeOutcome', 'readiness', 'machineChanged', 'hint', 'output',
+      'wakeOutcome', 'readiness', 'machineChanged', 'reattachments', 'continuityUncertain', 'hint', 'output',
     ].filter(key => Object.hasOwn(result, key)).map(key => [key, typeof result[key] === 'string' ? sanitize(result[key] as string) : result[key]]));
     // Strings are sanitized before serialization: JSON.stringify would otherwise
     // encode a control character as a six-character escape that the text
