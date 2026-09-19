@@ -80,6 +80,36 @@ test('protocol exit completes despite a held-open attachment, accepts multiline/
   expect(f.calls.filter(x => x === 'SpawnPty')).toHaveLength(1); f.service.close();
 });
 
+test('MCP reads accept larger requested pages, preserve the default and reject above the shared limit', async () => {
+  const f = fixture(), output = 'v'.repeat(8214);
+  const server = new McpServer({ name: 'fixture', version: '1' });
+  registerTerminalTools(server, PolicySchema.parse({ deleteEnabled: true,
+    terminal: { agentId: 'bc-test', executeEnabled: true },
+    defaultProfile: 'terminal', profiles: { terminal: { tools: ['*'] } } }), '', f.service);
+  const client = new Client({ name: 'fixture-client', version: '1' });
+  const [ct, st] = InMemoryTransport.createLinkedPair(); await server.connect(st); await client.connect(ct);
+  try {
+    await client.callTool({ name: 'cursor_terminal_status', arguments: {} });
+    await f.service.handle(f.request('execute')); await f.started();
+    f.data(Buffer.from(output)); f.exit(); await f.finished();
+    const args = { sessionId: f.service.sessionId, commandId: 'one' };
+    const small = await client.callTool({ name: 'cursor_terminal_read', arguments: args });
+    expect(small.structuredContent).toMatchObject({ output: 'v'.repeat(2000), outputNextOffset: 2000 });
+    const large = await client.callTool({ name: 'cursor_terminal_read', arguments: { ...args, outputLimit: 16384 } });
+    expect(large.structuredContent).toMatchObject({ output, outputNextOffset: 8214, outputLength: 8214 });
+    const text = (large.content as Array<{ type: string; text: string }>)[0]!.text;
+    const mirror = JSON.parse(text.slice(text.indexOf('\n\n') + 2, text.lastIndexOf('\nCURSOR_UNTRUSTED>>>')));
+    expect(mirror).toMatchObject({ output, outputNextOffset: 8214 });
+    expect((await client.callTool({ name: 'cursor_terminal_read', arguments: { ...args, outputLimit: 16385 } })).isError).toBe(true);
+    expect(await f.service.handle({ ...f.request('read'), outputLimit: 16385 })).toMatchObject({ status: 'invalid_request' });
+    const { tools } = await client.listTools();
+    for (const name of ['cursor_terminal_read', 'cursor_terminal_session_read', 'cursor_terminal_session_attach'])
+      expect(tools.find(tool => tool.name === name)?.inputSchema).toMatchObject({
+        properties: { outputLimit: { maximum: 16384, default: 2000 } },
+      });
+  } finally { await client.close(); await server.close(); }
+});
+
 test('Unicode byte splits and capped output retain valid pages while still observing exit', async () => {
   const f = fixture(9); await f.service.handle(f.request('execute')); await f.started();
   const bytes = Buffer.from('🌍🌍🌍'); f.data(bytes.subarray(0, 3)); f.data(bytes.subarray(3)); f.exit(0);

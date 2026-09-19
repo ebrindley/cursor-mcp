@@ -8,9 +8,8 @@ import { CursorTerminalConnector } from '../terminal-gateway.js';
 import { TerminalSessions } from '../terminal-sessions.js';
 import { TerminalService } from '../terminal.js';
 import { defineTool } from './register.js';
-import { fitTerminalPage } from '../terminal-output.js';
+import { fitTerminalPage, MAX_OUTPUT_CODE_POINTS, terminalText } from '../terminal-output.js';
 import { ok, structuredCost } from './result.js';
-import { sanitize } from '../untrusted.js';
 import { READ, CANCEL, DESTRUCTIVE, REVERSIBLE } from './annotations.js';
 
 const STREAM_LOSS_HINT = 'Output stream failed; see reason and cleanup. Do not resubmit uncertain work. For future jobs needing results after MCP restart, use caller-owned detached tmux with output and exit-status files, polled by short commands.';
@@ -66,22 +65,7 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
     // returned cursor has already skipped past.
     const paged = raw.outputReadFailed === true ? { ...raw, hint: STREAM_LOSS_HINT } : raw;
     const result = fitTerminalPage(paged, policy.maxResponseBytes);
-    // The text block carries the identifiers and output as well as the state
-    // fields. A client that renders only text content cannot otherwise obtain the
-    // session id it needs for the next call or read a command's output; the MCP
-    // specification expects structured content to be mirrored in text for such
-    // clients. The text passes through the same sanitizer and byte cap as before.
-    const summary = Object.fromEntries([
-      'agentId', 'status', 'sessionId', 'commandId', 'terminalId', 'nextCreateSequence',
-      'maxTargets', 'retainedTargets', 'targetOffset', 'targetNextOffset', 'state', 'commandOutcome', 'exitCode', 'signal', 'reason', 'httpStatus', 'failedOperation', 'cleanup', 'outputComplete',
-      'outputReadFailed', 'outputTruncated', 'outputOffset', 'outputNextOffset', 'outputLength',
-      'outputStartOffset', 'outputEndOffset', 'outputGap', 'reconnectGapPossible', 'inputOutcome', 'nextInputSequence', 'remoteOutcome', 'bytes', 'maxBytes',
-      'wakeOutcome', 'readiness', 'failureStage', 'serverElapsedMs', 'machineChanged', 'reattachments', 'continuityUncertain', 'hint', 'output',
-    ].filter(key => Object.hasOwn(result, key)).map(key => [key, typeof result[key] === 'string' ? sanitize(result[key] as string) : result[key]]));
-    // Strings are sanitized before serialization: JSON.stringify would otherwise
-    // encode a control character as a six-character escape that the text
-    // sanitizer in `ok` no longer recognizes, so the output would carry it.
-    return ok({ source: 'Cursor direct VM terminal', text: JSON.stringify(summary), structured: result, policy });
+    return ok({ source: 'Cursor direct VM terminal', text: terminalText(result), structured: result, policy });
   };
   const add = (operation: string, description: string, schema: z.ZodRawShape, annotations: typeof READ | typeof CANCEL | typeof DESTRUCTIVE | typeof REVERSIBLE) => {
     if (!annotations.readOnlyHint && !config.executeEnabled) return;
@@ -96,8 +80,8 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
     // The service returns structured size-limit rejections.
     { sessionId, commandId: id, command: z.string().min(1).refine(value => !value.includes('\0'), 'command must not contain NUL'),
       timeoutMs: z.number().int().min(1).max(300000).default(30000) }, DESTRUCTIVE);
-  add('read', 'Read retained command output. Follow outputNextOffset (Unicode code points). Retains first 64 KiB; outputTruncated marks loss. outputComplete means process exit observed, not lossless output. not_retained never proves non-execution.',
-    { sessionId, commandId: id, outputOffset: z.number().int().min(0).max(65536).default(0), outputLimit: z.number().int().min(1).max(2000).default(2000) }, READ);
+  add('read', 'Read retained command output. Follow outputNextOffset (Unicode code points). Request up to 16384 code points per page (default 2000); the response byte budget may return fewer. Retains first 64 KiB; outputTruncated marks loss. outputComplete means process exit observed, not lossless output. not_retained never proves non-execution.',
+    { sessionId, commandId: id, outputOffset: z.number().int().min(0).max(65536).default(0), outputLimit: z.number().int().min(1).max(MAX_OUTPUT_CODE_POINTS).default(2000) }, READ);
   add('cancel', 'Terminate an owned command and verify PTY absence on its original machine. Unknown cleanup can be retried; absence does not prove descendant exit. MCP cancellation is separate.', { sessionId, commandId: id }, CANCEL);
   add('reset', 'Release settled command results and rotate command sessionId. Refuses active work or unresolved cleanup. Old session IDs fail; interactive terminals are unaffected.', { sessionId }, CANCEL);
   const owned = { sessionId, terminalId: z.string().uuid() };
@@ -110,8 +94,8 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
     { ...owned, sequence, data: z.string().min(1) }, DESTRUCTIVE);
   add('session_resize', 'Resize an owned terminal; may signal its foreground program. Does not submit input.', { ...owned, ...dimensions }, REVERSIBLE);
   const sessionRead = { ...owned, outputOffset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
-    outputLimit: z.number().int().min(1).max(2000).default(2000), waitMs: z.number().int().min(0).max(10000).default(0) };
-  add('session_read', 'Read recent 64 KiB with Unicode offsets; follow outputNextOffset. outputGap counts evicted characters; reconnectGapPossible means uncertain continuity. Detached sessions attempt attachment once. waitMs cancellation leaves the shell running.', sessionRead, READ);
+    outputLimit: z.number().int().min(1).max(MAX_OUTPUT_CODE_POINTS).default(2000), waitMs: z.number().int().min(0).max(10000).default(0) };
+  add('session_read', 'Read recent 64 KiB with Unicode offsets; request up to 16384 code points per page (default 2000), subject to the response byte budget; follow outputNextOffset. outputGap counts evicted characters; reconnectGapPossible means uncertain continuity. Detached sessions attempt attachment once. waitMs cancellation leaves the shell running.', sessionRead, READ);
   add('session_attach', 'Reattach an owned terminal using its event cursor, then read output with session_read semantics. Never replays input. No adoption or recovery across MCP restart.', sessionRead, READ);
   add('session_close', 'Terminate and verify owned PTY absence; retry uncertain cleanup explicitly. forget=true only releases lost/identity-unknown records, reporting remoteOutcome unknown. Healthy terminals cannot be forgotten. MCP shutdown only detaches.', { ...owned, forget: z.boolean().default(false) }, CANCEL);
   return names;

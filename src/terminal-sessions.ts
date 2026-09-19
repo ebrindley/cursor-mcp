@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { MAX_OUTPUT_CODE_POINTS } from './terminal-output.js';
 import { StringDecoder } from 'node:string_decoder';
 import { object, TerminalFailure, type TerminalConnector, type TerminalPeer, failureFields } from './terminal-gateway.js';
 
@@ -112,7 +113,7 @@ export class TerminalSessions {
     if (!op) return { status: 'not_retained' };
     if (request.operation === 'read' || request.operation === 'attach') {
       const offset = request.outputOffset ?? op.start, limit = request.outputLimit ?? 2000, wait = request.waitMs ?? 0;
-      if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 2000 ||
+      if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > MAX_OUTPUT_CODE_POINTS ||
         !Number.isInteger(wait) || wait < 0 || wait > 10000) return { status: 'invalid_request' };
       if (op.state === 'detached') { try { await this.attach(op); } catch { /* Reason is retained by attach. */ } }
       if (wait && offset >= op.end && ['attached', 'attaching'].includes(op.state)) {

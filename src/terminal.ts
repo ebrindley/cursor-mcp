@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
+import { MAX_OUTPUT_CODE_POINTS } from './terminal-output.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { object, TerminalFailure, type TerminalConnector, type TerminalPeer, failureFields } from './terminal-gateway.js';
 
@@ -144,7 +145,7 @@ export class TerminalService {
       const op = this.results.get(request.commandId ?? '');
       if (!op) return { status: 'not_retained', sessionId: this.sessionId };
       const offset = request.outputOffset ?? 0, limit = request.outputLimit ?? 2000;
-      if (!Number.isInteger(offset) || offset < 0 || offset > 65536 || !Number.isInteger(limit) || limit < 1 || limit > 2000) return { status: 'invalid_request' };
+      if (!Number.isInteger(offset) || offset < 0 || offset > 65536 || !Number.isInteger(limit) || limit < 1 || limit > MAX_OUTPUT_CODE_POINTS) return { status: 'invalid_request' };
       if (request.operation === 'cancel' && op.state === 'finished' && op.cleanup === 'termination_unconfirmed' && op.ptyId && !this.closed) {
         op.state = 'cleaning';
         op.cleanup = await this.terminate(op);

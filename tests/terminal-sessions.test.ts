@@ -63,6 +63,22 @@ test('owned sessions support persistent input/resize, bounded concurrency and sa
     .toMatchObject({ inputOutcome: 'submitted', nextInputSequence: 2 }); f.service.close();
 });
 
+test('interactive read and attach allow larger requested code-point pages and keep the default', async () => {
+  const f = fixture(), a = await f.create();
+  const output = '🌍'.repeat(10000);
+  try {
+    f.event({ eventId: 'large', ptyData: { data: Buffer.from(output).toString('base64') } });
+    expect(await f.service.handle(f.request('read', { terminalId: a.terminalId })))
+      .toMatchObject({ output: '🌍'.repeat(2000), outputNextOffset: 2000 });
+    for (const operation of ['read', 'attach']) {
+      expect(await f.service.handle(f.request(operation, { terminalId: a.terminalId, outputLimit: 16384 })))
+        .toMatchObject({ output, outputNextOffset: 10000 });
+      expect(await f.service.handle(f.request(operation, { terminalId: a.terminalId, outputLimit: 16385 })))
+        .toMatchObject({ status: 'invalid_request' });
+    }
+  } finally { f.service.close(); }
+});
+
 test('stream loss detaches, resumes from opaque cursor, suppresses replay and exposes output gaps', async () => {
   const f = fixture(12), a = await f.create();
   const data = (eventId: string, text: string) => ({ eventId, ptyData: { data: Buffer.from(text).toString('base64') } });
