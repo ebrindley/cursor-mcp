@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-/** Where a Cursor control-plane call failed: the RPC name and, for an HTTP rejection, its status. Never a URL or a body. */
+/** Where a Cursor call failed: the RPC name and observed HTTP status. Never a URL or a body. */
 export interface FailureDetail { httpStatus?: number; operation?: string }
 export class TerminalFailure extends Error {
   constructor(readonly code: string, readonly submitted = false, readonly detail: FailureDetail = {}) { super(code); }
@@ -119,7 +119,8 @@ export class TerminalGateway implements TerminalPeer {
       };
       const fail = (code: string) => {
         if (settled) return;
-        settled = true; cleanup(); cancelRequest(); reject(new TerminalFailure(code, sent));
+        settled = true; cleanup(); cancelRequest();
+        reject(new TerminalFailure(code, sent, { operation: method, ...(status === undefined ? {} : { httpStatus: status }) }));
       };
       const abort = () => fail('request_cancelled');
       this.pending.set(requestId, { socket, streaming, fail, frame: frame => {

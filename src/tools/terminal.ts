@@ -31,6 +31,7 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
   const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
   const sessionId = z.string().uuid();
   const invoke = async (operation: string, args: Record<string, unknown> = {}) => {
+    const started = performance.now();
     const signal = currentRequestSignal();
     let raw: Record<string, unknown>;
     if (operation === 'status' && args.overview === true) {
@@ -56,6 +57,10 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
         raw = await targets.handle(agentId, operation, args, signal);
       }
     }
+    // Admission exceptions retain the shared error path. Timed terminal results
+    // include successful admission, but exclude MCP transport and client time.
+    if (operation === 'wake' || (operation === 'status' && args.overview !== true))
+      raw.serverElapsedMs = Math.round(performance.now() - started);
     // The hint joins the result before paging so the fit charges its bytes; added
     // afterwards it could push the envelope past the budget and truncate output the
     // returned cursor has already skipped past.
@@ -71,7 +76,7 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
       'maxTargets', 'retainedTargets', 'targetOffset', 'targetNextOffset', 'state', 'commandOutcome', 'exitCode', 'signal', 'reason', 'httpStatus', 'failedOperation', 'cleanup', 'outputComplete',
       'outputReadFailed', 'outputTruncated', 'outputOffset', 'outputNextOffset', 'outputLength',
       'outputStartOffset', 'outputEndOffset', 'outputGap', 'reconnectGapPossible', 'inputOutcome', 'nextInputSequence', 'remoteOutcome', 'bytes', 'maxBytes',
-      'wakeOutcome', 'readiness', 'machineChanged', 'reattachments', 'continuityUncertain', 'hint', 'output',
+      'wakeOutcome', 'readiness', 'failureStage', 'serverElapsedMs', 'machineChanged', 'reattachments', 'continuityUncertain', 'hint', 'output',
     ].filter(key => Object.hasOwn(result, key)).map(key => [key, typeof result[key] === 'string' ? sanitize(result[key] as string) : result[key]]));
     // Strings are sanitized before serialization: JSON.stringify would otherwise
     // encode a control character as a six-character escape that the text

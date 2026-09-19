@@ -89,8 +89,23 @@ test('stream detach sends request cancellation and does not send TerminatePty', 
 
 test('unary timeout is bounded and retains ambiguous delivery', async () => {
   const f = fixture(10);
-  await expect(f.gateway.unary('SpawnPty', {})).rejects.toMatchObject({ code: 'terminal_rpc_timeout', submitted: true });
+  await expect(f.gateway.unary('SpawnPty', {})).rejects.toMatchObject({
+    code: 'terminal_rpc_timeout', submitted: true, detail: { operation: 'SpawnPty' },
+  });
   expect(f.socket().sent.filter(x => x.type === 1)).toHaveLength(1); f.gateway.close();
+});
+
+test('pod RPC rejection preserves its method and observed HTTP status without response bodies', async () => {
+  const f = fixture();
+  try {
+    const pending = f.gateway.unary('ListPtys', {});
+    f.socket().respond = frame => f.socket().reply(frame.requestId, { message: 'private-pty' }, 503);
+    const error = await pending.catch(error => error);
+    expect(error).toMatchObject({ code: 'terminal_rpc_failed', submitted: true,
+      detail: { operation: 'ListPtys', httpStatus: 503 } });
+    expect(JSON.stringify(error)).not.toContain('private-pty');
+    expect(error.message).toBe('terminal_rpc_failed');
+  } finally { f.gateway.close(); }
 });
 
 test('standalone auth caches its token, rediscovers machines, and rejects changed cleanup identity', async () => {

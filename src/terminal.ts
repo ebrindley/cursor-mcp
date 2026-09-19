@@ -40,7 +40,7 @@ export class TerminalService {
   get canRetire() { return !this.active && this.results.size === 0; }
   get retention() { return { retainedResults: this.results.size, activeCommandId: this.active?.commandId ?? null }; }
 
-  private async probe(signal: AbortSignal): Promise<{ status: string; machineId: string | undefined }> {
+  private async probe(signal: AbortSignal): Promise<{ status: string; machineId: string | undefined } & ReturnType<typeof failureFields>> {
     let peer: TerminalPeer | undefined, machineId: string | undefined;
     try {
       ({ peer, machineId } = await this.connector.connect(undefined, signal));
@@ -54,8 +54,16 @@ export class TerminalService {
   }
 
   private async wake(waitMs: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    const result = { status: 'wake', sessionId: this.sessionId, wakeOutcome: 'not_submitted',
+    const result: Record<string, unknown> = { status: 'wake', sessionId: this.sessionId, wakeOutcome: 'not_submitted',
       readiness: 'skipped', machineChanged: null as boolean | null, reason: null as string | null };
+    const recordFailure = (stage: 'precheck' | 'submission' | 'readiness', reason: string,
+      detail: ReturnType<typeof failureFields>) => {
+      result.reason = reason; result.failureStage = stage;
+      // Replace one failure's provenance as a unit; absent fields must not linger.
+      delete result.httpStatus; delete result.failedOperation;
+      if (detail.httpStatus !== undefined) result.httpStatus = detail.httpStatus;
+      if (detail.failedOperation !== undefined) result.failedOperation = detail.failedOperation;
+    };
     if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 60000) return { ...result, status: 'invalid_request' };
     const lifetime = AbortSignal.any([this.shutdown.signal, ...(signal ? [signal] : [])]);
     if (lifetime.aborted) return { ...result, readiness: 'cancelled' };
@@ -64,15 +72,16 @@ export class TerminalService {
     const before = await this.probe(precheck);
     if (precheck.aborted) return { ...result, readiness: lifetime.aborted ? 'cancelled' : 'deadline' };
     if (before.status === 'ready') return { ...result, status: 'already_ready', readiness: 'ready' };
-    if (before.status !== 'gateway_unavailable' || !before.machineId || !this.connector.wake)
-      return { ...result, readiness: 'unavailable', reason: before.status };
+    if (before.status !== 'gateway_unavailable' || !before.machineId || !this.connector.wake) {
+      recordFailure('precheck', before.status, before);
+      return { ...result, readiness: 'unavailable' };
+    }
     try {
       result.wakeOutcome = await this.connector.wake(lifetime) ? 'signaled' : 'not_signaled';
     } catch (error) {
       result.wakeOutcome = error instanceof TerminalFailure && !error.submitted ?
         (['terminal_permission_denied', 'terminal_authentication_expired'].includes(error.code) ? 'rejected' : 'not_submitted') : 'unknown';
-      result.reason = error instanceof TerminalFailure ? error.code : 'terminal_connection_failed';
-      Object.assign(result, failureFields(error));
+      recordFailure('submission', error instanceof TerminalFailure ? error.code : 'terminal_connection_failed', failureFields(error));
       if (result.wakeOutcome !== 'unknown') return { ...result, readiness: lifetime.aborted ? 'cancelled' : 'skipped' };
     }
     if (lifetime.aborted) return { ...result, readiness: 'cancelled' };
@@ -84,7 +93,10 @@ export class TerminalService {
       if (after.machineId) result.machineChanged = after.machineId !== before.machineId;
       if (polling.aborted) break;
       if (after.status === 'ready') return { ...result, readiness: 'ready' };
-      if (after.status !== 'gateway_unavailable') return { ...result, readiness: 'unavailable', reason: after.status };
+      if (after.status !== 'gateway_unavailable') {
+        recordFailure('readiness', after.status, after);
+        return { ...result, readiness: 'unavailable' };
+      }
       try { await delay(1000, undefined, { signal: polling }); } catch { break; }
     }
     return { ...result, readiness: lifetime.aborted ? 'cancelled' : 'deadline' };

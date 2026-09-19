@@ -6,6 +6,8 @@ import { PolicySchema } from '../src/config.js';
 import { TerminalService } from '../src/terminal.js';
 import { TerminalFailure, type TerminalConnector, type TerminalPeer } from '../src/terminal-gateway.js';
 import { registerTerminalTools } from '../src/tools/terminal.js';
+import { PolicyError } from '../src/errors.js';
+import { fail } from '../src/tools/result.js';
 
 function fixture(maxBytes = 65536, maxResults = 32) {
   const calls: string[] = [];
@@ -522,10 +524,60 @@ test.each([true, false, new TerminalFailure('terminal_connection_failed', true, 
     expect(await f.service.handle({ operation: 'wake' })).toMatchObject({ sessionId, readiness: 'ready', machineChanged: true,
       wakeOutcome: outcome === true ? 'signaled' : outcome === false ? 'not_signaled' : 'unknown',
       reason: outcome instanceof Error ? 'terminal_connection_failed' : null,
-      ...(outcome instanceof Error ? { httpStatus: 503, failedOperation: 'WakeBackgroundComposer' } : {}) });
+      ...(outcome instanceof Error ? { failureStage: 'submission', httpStatus: 503, failedOperation: 'WakeBackgroundComposer' } : {}) });
     expect(f.wake).toHaveBeenCalledOnce(); expect(f.calls).toEqual(['ListPtys', 'ListPtys', 'ListPtys']);
     expect(f.service.sessionId).toBe(sessionId);
   } finally { f.service.close(); }
+});
+
+test.each(['precheck', 'readiness-detailed', 'readiness-plain'] as const)('wake retains coherent failure provenance for %s', async mode => {
+  let connections = 0;
+  const wake = vi.fn(async () => { throw new TerminalFailure('terminal_connection_failed', true,
+    { operation: 'WakeBackgroundComposer', httpStatus: 503 }); });
+  const detail = mode === 'readiness-plain' ? {} : { operation: 'ListPtys', httpStatus: 403 };
+  const service = new TerminalService('bc-test', { wake, async connect() {
+    const first = ++connections === 1;
+    return { machineId: 'machine', peer: { close() {}, async stream() {},
+      async unary() {
+        if (first && mode !== 'precheck') throw new TerminalFailure('gateway_unavailable');
+        throw new TerminalFailure('terminal_permission_denied', false, detail);
+      } } };
+  } });
+  try {
+    const result = await service.handle({ operation: 'wake' });
+    expect(result).toMatchObject({ reason: 'terminal_permission_denied', readiness: 'unavailable',
+      failureStage: mode === 'precheck' ? 'precheck' : 'readiness',
+      wakeOutcome: mode === 'precheck' ? 'not_submitted' : 'unknown' });
+    if (mode === 'readiness-plain') {
+      expect(result).not.toHaveProperty('httpStatus');
+      expect(result).not.toHaveProperty('failedOperation');
+    } else expect(result).toMatchObject({ httpStatus: 403, failedOperation: 'ListPtys' });
+    expect(wake).toHaveBeenCalledTimes(mode === 'precheck' ? 0 : 1);
+  } finally { service.close(); }
+});
+
+test('status/wake server timing includes admission while refusals and overview stay unchanged', async () => {
+  let now = 100;
+  const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+  const policy = PolicySchema.parse({ terminal: { targets: 'profile', executeEnabled: true }, deleteEnabled: true,
+    defaultProfile: 'terminal', profiles: { terminal: { tools: ['*'] } } });
+  const server = new McpServer({ name: 'fixture', version: '1' });
+  const backend = { async handle() { now += 7; return { status: 'ready' }; }, close() {} };
+  const scope = { async assert(id: string) { now += 15; if (id === 'bc-denied') throw new PolicyError('denied'); } };
+  registerTerminalTools(server, policy, '', backend, scope);
+  const client = new Client({ name: 'fixture-client', version: '1' });
+  const [ct, st] = InMemoryTransport.createLinkedPair(); await server.connect(st); await client.connect(ct);
+  try {
+    for (const name of ['cursor_terminal_status', 'cursor_terminal_wake']) {
+      const result = await client.callTool({ name, arguments: { agentId: 'bc-test' } });
+      expect(result.structuredContent).toMatchObject({ serverElapsedMs: 22 });
+      expect(JSON.stringify(result.content)).toContain('serverElapsedMs');
+      expect(await client.callTool({ name, arguments: { agentId: 'bc-denied' } }))
+        .toEqual(fail(new PolicyError('denied'), policy));
+    }
+    expect((await client.callTool({ name: 'cursor_terminal_status', arguments: { overview: true } })).structuredContent)
+      .not.toHaveProperty('serverElapsedMs');
+  } finally { await client.close(); await server.close(); clock.mockRestore(); }
 });
 
 test('status carries the failed Cursor operation and HTTP status beside the unchanged code', async () => {
