@@ -118,6 +118,11 @@ export interface RequestOptions {
   query?: Record<string, string | number | boolean | undefined>;
   body?: unknown;
   signal?: AbortSignal;
+  /**
+   * `false` makes this one attempt, even for a GET. For a caller that owns its
+   * own retry and pacing, so every attempt it counts is an attempt sent.
+   */
+  retry?: false;
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -368,7 +373,7 @@ export class CursorClient {
         // A cancelled caller is not a transport failure to retry through: the
         // client has already stopped listening.
         if (error instanceof CursorCancelledError) throw error;
-        const wait = this.#retryDelay(error, attempt, retryable);
+        const wait = this.#retryDelay(error, attempt, retryable && options.retry !== false);
         if (wait === undefined) throw error;
         if (Date.now() + wait >= deadline) {
           throw new CursorTransportError(

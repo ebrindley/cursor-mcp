@@ -18,6 +18,7 @@ import { log } from "./log.js";
 import { registerAccountTools } from "./tools/account.js";
 import { registerAgentTools } from "./tools/agents.js";
 import { registerArtifactTools } from "./tools/artifacts.js";
+import { registerBulkTools } from "./tools/bulk.js";
 import { registerEnvironmentCatalogTools } from "./tools/environment-catalog.js";
 import { registerEnvironmentDefinitionTools } from "./tools/environment-definition.js";
 import { registerEnvironmentHealthTools } from "./tools/environment-health.js";
@@ -50,6 +51,9 @@ export async function main(): Promise<void> {
     ...registerRunExportTool(server, client, policy, scope),
     ...registerArtifactTools(server, client, policy, scope),
     ...registerLifecycleTools(server, client, policy, scope),
+    // Bulk archive/unarchive: a paced background job, because one call cannot
+    // cover hundreds of agents inside the host's request timeout.
+    ...registerBulkTools(server, client, policy, scope),
     // Local and generic: no client, because Environment Definition talks to a
     // repository file and the caller's own text, never to Cursor.
     ...registerEnvironmentDefinitionTools(server, policy),

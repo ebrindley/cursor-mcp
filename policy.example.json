@@ -3,6 +3,11 @@
   "activationEnabled": false,
   "defaultProfile": "read-only",
   "maxResponseBytes": 32768,
+  "bulk": {
+    "writesPerMinute": 80,
+    "readsPerMinute": 240,
+    "maxInFlight": 4
+  },
   "profiles": {
     "read-only": {
       "repos": [],

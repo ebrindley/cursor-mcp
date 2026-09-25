@@ -190,6 +190,9 @@ which this server does not do.
 | `cursor_archive_agent` | `POST /v1/agents/{id}/archive` | yes |
 | `cursor_unarchive_agent` | `POST /v1/agents/{id}/unarchive` | yes |
 | `cursor_delete_agent` | `DELETE /v1/agents/{id}` | yes, needs `deleteEnabled` and `confirm: true` |
+| `cursor_start_bulk_job` | background job: per agent `GET /v1/agents/{id}` then `POST .../archive` or `.../unarchive`, paced by policy `bulk` | yes |
+| `cursor_get_bulk_job` | in-process job state; no request | |
+| `cursor_cancel_bulk_job` | in-process job state; no request | yes |
 | `cursor_validate_environment_definition` | local `.cursor/environment.json` or supplied text | |
 | `cursor_inspect_environment_definition` | local `.cursor/environment.json` or supplied text | |
 | `cursor_diff_environment_definition` | local `.cursor/environment.json` or supplied text | |
@@ -385,6 +388,39 @@ pushed work to the remote.
 Agents can accumulate and make lists difficult to navigate. Archive the
 finished ones and pass `includeArchived: false` to hide them. Cursor's own default is
 `true`, and this server does not override it.
+
+**Bulk archive and unarchive run as a background job.** Cursor has no bulk endpoint
+and one tool call cannot cover hundreds of agents within the host's request timeout,
+so `cursor_start_bulk_job` returns a job id at once and the job continues in this
+process. Read it with `cursor_get_bulk_job` (`waitSeconds` up to 40 returns early when
+the job finishes; `state`, `offset` and `limit` page the items). One job runs per server;
+the last five finished jobs stay readable. A job does not survive a restart: re-submit
+the original ids, which is safe because archive and unarchive are idempotent.
+
+- **Pacing.** Every HTTP attempt, retries included, counts against the policy `bulk`
+  budgets: `readsPerMinute` (default 240) and `writesPerMinute` (default 80) in any
+  60-second window, `maxInFlight` agents at once (default 4). The defaults sit about 20%
+  under the limits measured in [cursor-capabilities.md](cursor-capabilities.md#rate-limits).
+  Other processes using the same key are not metered.
+- **Scope.** Each POST attempt, retries included, follows a fresh `GET /v1/agents/{id}`
+  whose `id` must match; its verdict decides `denied` (`POLICY_DENIED`) or `unresolved`
+  (`SCOPE_UNRESOLVED`) with no POST.
+- **Backoff.** A 429 honours `Retry-After` in full (otherwise capped exponential backoff
+  with jitter, `backoffBaseMs`..`backoffMaxMs`) and pauses that endpoint for the whole job.
+  After `maxRateLimitRetries` the agent is `failed` with `RATE_LIMITED`. Usage exhaustion
+  stops the job; unsent agents are `notSubmitted` with `USAGE_EXHAUSTED`.
+- **Outcomes.** `done`, `denied`, `unresolved`, `failed`, `uncertain`, `notSubmitted`, plus
+  `pending`, `inFlight` and `retrying` while running. `uncertain` (`OUTCOME_UNKNOWN`,
+  `SERVER_ERROR`, `IDENTITY_MISMATCH`, `CONTRACT_ERROR`) means the POST was sent and its
+  answer was lost or unusable; Cursor may have applied it, and the job never re-sends it.
+- **Cancel and limits.** `cursor_cancel_bulk_job` stops new work; requests already sent
+  finish and completed changes are not reverted. `jobTimeoutMinutes` (default 60) stops a
+  job the same way. Shutdown cuts off in-flight requests, which then read `uncertain`.
+- **Choosing ids.** List with `includeArchived: false`. When `cursor_list_agents` reports
+  agents it could not check, re-list with `limit` of 20 or less: unchecked rows are counted
+  but their ids are not returned. Finish paging before archiving; unarchive moved an agent
+  to the top of the list in live use. Bulk unarchive sets the opposite state; it is not an
+  exact rollback.
 
 **`cursor_list_agents` takes an optional `prUrl` filter.** Cursor documents it as "Filter
 agents by GitHub pull request URL" (rechecked

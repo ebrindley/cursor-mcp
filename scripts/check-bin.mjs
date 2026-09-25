@@ -60,6 +60,7 @@ const EXPECTED_READ_ONLY_TOOLS = [
   "cursor_diff_environment_definition",
   "cursor_get_agent",
   "cursor_get_artifact_url",
+  "cursor_get_bulk_job",
   "cursor_get_environment_configuration",
   "cursor_get_run",
   "cursor_get_usage",

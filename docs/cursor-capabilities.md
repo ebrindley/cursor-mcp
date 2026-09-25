@@ -335,3 +335,20 @@ Upstream drift is reported; it does not block unrelated development.
 
 Do not refresh by triggering Builds, saving environments, activating versions,
 or inspecting secrets.
+
+## Rate limits
+
+Measured 2026-09-25 with one API key (`observed`). Cursor publishes no figure for these
+endpoints; its documented 20 requests/minute default did not apply.
+
+| Endpoint (as named in the 429 body) | Limit | Evidence |
+|---|---|---|
+| `get_agent_status` (`GET /v1/agents/{id}`) | 300 requests/min | 429 at request 302 in one minute, 16 in flight |
+| `archive_agent` (`POST /v1/agents/{id}/archive`) | 100 requests/min | 429 at request 101, 8 in flight |
+| `unarchive_agent` | not measured | |
+
+Limits are per endpoint. `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset`
+and `retry-after` (31-41 s observed) appear only on a 429, never on success. Sequential
+calls stayed latency-bound (about 60 reads or 42 writes per minute) and were never limited.
+Whether a limit is per key, user, or team is unknown. The bulk job defaults in
+[reference.md](reference.md) derive from these figures.

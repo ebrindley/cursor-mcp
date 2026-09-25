@@ -26,6 +26,32 @@ import { environmentBindingProblems } from "./policy.js";
 export const DEFAULT_MAX_RESPONSE_BYTES = 32_768;
 
 /**
+ * Bulk job pacing. Defaults sit about 20% under the per-endpoint limits measured
+ * on 2026-09-25 (get_agent_status 300/min, archive_agent 100/min), which Cursor
+ * does not publish and may change -- hence configurable.
+ */
+export const BulkSchema = z.strictObject({
+  /** Archive/unarchive POST attempts in any 60-second window. */
+  writesPerMinute: z.number().int().min(1).max(1_000).default(80),
+  /** Scope-check GET attempts in any 60-second window. */
+  readsPerMinute: z.number().int().min(1).max(1_000).default(240),
+  /** Agents in progress at once. */
+  maxInFlight: z.number().int().min(1).max(16).default(4),
+  /** Rate-limited attempts per agent before it is marked failed. */
+  maxRateLimitRetries: z.number().int().min(0).max(20).default(5),
+  /** Transient (5xx/transport) scope-read retries per agent. */
+  maxTransientRetries: z.number().int().min(0).max(10).default(3),
+  /** First backoff when Cursor sends no Retry-After; doubles per attempt. */
+  backoffBaseMs: z.number().int().min(100).max(60_000).default(2_000),
+  /** Ceiling on a computed backoff. A Retry-After is honoured in full. */
+  backoffMaxMs: z.number().int().min(1_000).max(600_000).default(60_000),
+  /** Wall-clock limit on one job; unfinished agents are then reported not submitted. */
+  jobTimeoutMinutes: z.number().int().min(1).max(240).default(60),
+  /** Agent ids one job accepts. */
+  maxAgents: z.number().int().min(1).max(5_000).default(1_000),
+});
+
+/**
  * Where a named environment lives.
  *
  * Cursor offers a personal environment and a team one, and they are not the same
@@ -236,9 +262,21 @@ export const PolicySchema = z.strictObject({
     .int()
     .min(1_024)
     .default(DEFAULT_MAX_RESPONSE_BYTES),
+  /**
+   * Pacing for bulk archive/unarchive jobs. Absent means the defaults below,
+   * which sit about 20% under Cursor's measured per-endpoint limits. Setting
+   * this grants nothing: the bulk tools still need the profile allowlist.
+   */
+  bulk: BulkSchema.optional(),
 });
 
 export type Policy = z.infer<typeof PolicySchema>;
+export type BulkSettings = z.infer<typeof BulkSchema>;
+
+/** The effective bulk pacing: the policy's block, or every default. */
+export function bulkSettings(policy: Policy): BulkSettings {
+  return policy.bulk ?? BulkSchema.parse({});
+}
 
 /** What we run as when no policy file exists: reads only, nothing else. */
 export const READ_ONLY_POLICY: Policy = {
