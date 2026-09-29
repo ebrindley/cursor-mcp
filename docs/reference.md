@@ -1,6 +1,12 @@
-# Technical reference
+# Cursor Cloud Agents & VMs: technical reference
 
 [Installation and first task](../README.md).
+
+The display name describes the integration's domain. It does not mean every tool
+launches a VM or has only remote effects. Use the [execution-selection rule](../README.md#local-cursor-or-cloud-agents)
+to distinguish general local Cursor work from Cloud Agent management. Technical
+identities (`cursor-mcp`, the `cursor` registration key and `cursor_*` tool names)
+remain stable; display titles and descriptions are presentation metadata.
 
 ## Design
 
@@ -14,6 +20,9 @@ structured owner-action residual.
 **Terse tool descriptions.** Tool definitions sit in the client's context on every
 request, and prose is the dominant cost there — measured at roughly 350 tokens per tool
 for a chatty description against about 105 for a one-liner. Guidance lives here instead.
+Server instructions and focused scope descriptions carry the local/cloud boundary;
+titles are an additional UI aid that a client may omit. This guidance does not
+replace the existing permission controls or guarantee the assistant's tool choice.
 
 **stdio only.** No HTTP transport, so no port, no CORS surface, no unauthenticated
 endpoint.

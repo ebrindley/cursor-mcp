@@ -262,7 +262,7 @@ export function registerAgentTools(
   define({
     name: "cursor_list_agents",
     config: {
-      title: "Cursor: list agents",
+      title: "Cursor Cloud: list agents",
       description:
         "List cloud agents, newest first. Status is not execution state; use cursor_get_run.",
       inputSchema: {
@@ -408,7 +408,7 @@ export function registerAgentTools(
   define({
     name: "cursor_get_agent",
     config: {
-      title: "Cursor: get agent",
+      title: "Cursor Cloud: get agent",
       description:
         "Inspect one agent: repos, settings, web URL, and the id of its most recent run.",
       inputSchema: { agentId: AgentId },
@@ -451,7 +451,7 @@ export function registerAgentTools(
   define({
     name: "cursor_list_runs",
     config: {
-      title: "Cursor: list runs",
+      title: "Cursor Cloud: list runs",
       description:
         "List an agent's runs, newest first. Run status carries the execution state: CREATING, RUNNING, or a terminal value.",
       inputSchema: { agentId: AgentId, ...Page },
@@ -501,7 +501,7 @@ export function registerAgentTools(
   define({
     name: "cursor_get_run",
     config: {
-      title: "Cursor: get run",
+      title: "Cursor Cloud: get run",
       description:
         "Inspect one run: status, duration, reported branch or PR, and the final reply once it has finished.",
       inputSchema: { agentId: AgentId, runId: RunIdArg },
@@ -526,7 +526,7 @@ export function registerAgentTools(
   define({
     name: "cursor_inspect_runs",
     config: {
-      title: "Cursor: inspect several runs",
+      title: "Cursor Cloud: inspect several runs",
       // Short on purpose: every registered description costs the client context
       // on every request. The contract is in docs/reference.md.
       description:
@@ -796,7 +796,7 @@ export function registerAgentTools(
   define({
     name: "cursor_wait_run",
     config: {
-      title: "Cursor: wait for run",
+      title: "Cursor Cloud: wait for run",
       description:
         `Poll one run until it is terminal or waitMs elapses (default ${DEFAULT_RUN_WAIT_MS / 1000}s, maximum ${MAX_RUN_WAIT_MS / 1000}s). Returns what cursor_get_run returns plus timedOut; call again to keep waiting.`,
       inputSchema: {
@@ -907,7 +907,7 @@ export function registerAgentTools(
   define({
     name: "cursor_get_usage",
     config: {
-      title: "Cursor: get usage",
+      title: "Cursor Cloud: get usage",
       description:
         "Report an agent's token usage, totalled and broken down per run. Pass runId to scope it to one run.",
       inputSchema: {
@@ -971,16 +971,16 @@ export function registerAgentTools(
   define({
     name: "cursor_create_agent",
     config: {
-      title: "Cursor: launch agent",
+      title: "Cursor Cloud: launch agent",
       description:
-        "Launch a cloud agent; no target defaults to a no-repository VM for launch-enabled profiles. Explicit repos or environments retain their policy checks.",
+        "Launch a Cursor Cloud Agent in a remote workspace, not local cursor-agent. No target defaults to a no-repository VM for launch-enabled profiles. Explicit repos or environments retain their policy checks.",
       inputSchema: {
         repo: z
           .string()
           .min(1)
           .optional()
           .describe(
-            "Repository as owner/name or a GitHub URL. For work in the current project, resolve that project's Git remote using your host workspace context and pass it here; no repository registration is needed in account mode. Ask only if the task target is ambiguous. Mutually exclusive with repos and environment.",
+            "Repository as owner/name or a GitHub URL. Once cloud execution is selected for the current project, resolve its Git remote and pass it here. Local-only files and unpushed changes are not automatically included. No repository registration is needed in account mode. Ask only if the cloud task's repository target is ambiguous. Mutually exclusive with repos and environment.",
           ),
         repos: z
           .array(LaunchRepoInput)
@@ -1209,9 +1209,9 @@ export function registerAgentTools(
   define({
     name: "cursor_create_run",
     config: {
-      title: "Cursor: follow up",
+      title: "Cursor Cloud: follow up",
       description:
-        "Send a follow-up prompt to an existing agent, reusing its workspace. Fails with agent_busy if a run is active.",
+        "Send a follow-up prompt to an existing Cursor Cloud Agent, reusing its remote workspace. Does not run the local Cursor CLI. Fails with agent_busy if a run is active.",
       inputSchema: {
         agentId: AgentId,
         prompt: z.string().min(1),
@@ -1255,7 +1255,7 @@ export function registerAgentTools(
   define({
     name: "cursor_cancel_run",
     config: {
-      title: "Cursor: cancel run",
+      title: "Cursor Cloud: cancel run",
       description:
         "Request that an in-progress run stop. Asynchronous: confirm with cursor_get_run. Pushed work stays.",
       inputSchema: { agentId: AgentId, runId: RunIdArg },

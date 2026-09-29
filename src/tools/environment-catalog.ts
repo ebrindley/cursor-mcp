@@ -243,9 +243,9 @@ export function registerEnvironmentCatalogTools(
   define({
     name: ENVIRONMENT_LIST_TOOL,
     config: {
-      title: "Cursor: list environments",
+      title: "Cursor Cloud: list environments",
       description:
-        "Discover environments and their repositories. Uses a configured CLI catalog when available. Profiles with environmentAccess \"account\" otherwise report environment names observed on agents launched with a named environment (partial); other profiles report the CLI status only. Existing agents themselves are listed by cursor_list_agents. Use these associations with the current project Git remote; ask only if the task target is ambiguous.",
+        "Discover Cloud Agent environments and repositories. Uses the configured local Cursor CLI to read account state when available. Profiles with environmentAccess \"account\" otherwise report environment names observed on agents launched with a named environment (partial); other profiles report the CLI status only. Existing agents themselves are listed by cursor_list_agents. Once cloud execution is selected, use these associations with the project Git remote; ask only if that cloud target is ambiguous.",
       inputSchema: { scope: ScopeFilter.optional(), cursor: z.string().optional() },
       outputSchema: RESULT_OUT,
       annotations: READ,
@@ -346,9 +346,9 @@ export function registerEnvironmentCatalogTools(
   define({
     name: ENVIRONMENT_CONFIGURATION_TOOL,
     config: {
-      title: "Cursor: get environment configuration",
+      title: "Cursor Cloud: get environment configuration",
       description:
-        "Read one environment's configuration candidates, source, precedence, and digest through a configured Cursor CLI. Scripts stay digests.",
+        "Read one Cloud Agent environment's configuration candidates, source, precedence, and digest through the configured local Cursor CLI acting on account state. Scripts stay digests.",
       inputSchema: { environmentPublicId: PublicIdArg },
       outputSchema: RESULT_OUT,
       annotations: READ,

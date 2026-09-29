@@ -113,9 +113,9 @@ export function registerEnvironmentLifecycleTools(
   define({
     name: "cursor_run_environment_lifecycle",
     config: {
-      title: "Cursor: plan environment lifecycle",
+      title: "Cursor Cloud: plan environment lifecycle",
       description:
-        "Plan the environment lifecycle or judge owner actions for Build cancel and rollback. " +
+        "Locally plan the Cloud Agent environment lifecycle or judge owner actions for Build cancel and rollback. " +
         "Launches nothing and performs no upstream mutation. A confirmed lifecycle returns PLANNING_ONLY; confirming again does not enable execution.",
       inputSchema: {
         environment: EnvironmentArg,

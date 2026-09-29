@@ -13,6 +13,8 @@ import { spawn } from "node:child_process";
 import { mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { describe, expect, it } from "vitest";
 
 async function policyFile(): Promise<string> {
@@ -63,5 +65,61 @@ describe("entry-point detection", () => {
     await symlink(resolve("src/server.ts"), link);
 
     expect(await startedSurface(link, await policyFile())).toContain("ready:");
+  }, 30_000);
+
+  it("exposes cloud scope through production initialization and tool discovery", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cursor-mcp-presentation-"));
+    const policy = join(dir, "policy.json");
+    await writeFile(policy, JSON.stringify({
+      deleteEnabled: true,
+      defaultProfile: "p",
+      profiles: { p: { tools: ["*"], repos: ["*"], environments: ["example"] } },
+      terminal: { agentId: "bc-metadata-test", executeEnabled: true },
+      exportRoot: dir,
+    }));
+    const client = new Client({ name: "presentation-test", version: "1" });
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["node_modules/tsx/dist/cli.mjs", "src/server.ts"],
+      env: {
+        ...process.env,
+        CURSOR_API_KEY: "dummy-not-real",
+        CURSOR_MCP_POLICY: policy,
+        CURSOR_MCP_LOG_LEVEL: "error",
+      },
+      stderr: "pipe",
+    });
+    try {
+      // Initialization and tools/list use no Cursor API or VM operation.
+      await client.connect(transport);
+      expect(client.getServerVersion()).toMatchObject({
+        name: "cursor-mcp",
+        title: "Cursor Cloud Agents & VMs",
+      });
+      expect(client.getInstructions()).toContain("not a general local coding or research runner");
+      expect(client.getInstructions()).toContain("do not silently provision a cloud workspace");
+      const { tools } = await client.listTools();
+      expect(tools.every(tool => tool.title?.startsWith("Cursor Cloud:"))).toBe(true);
+      const tool = (name: string) => {
+        const found = tools.find(candidate => candidate.name === name);
+        expect(found, name).toBeDefined();
+        return found!;
+      };
+      const launch = tool("cursor_create_agent");
+      expect(launch.description).toContain("remote workspace, not local cursor-agent");
+      expect(launch.inputSchema.properties?.repo).toMatchObject({
+        type: "string",
+        description: expect.stringContaining("Once cloud execution is selected"),
+      });
+      expect(tool("cursor_create_run").description).toContain("existing Cursor Cloud Agent");
+      expect(tool("cursor_list_models").description).toContain("not the local Cursor CLI catalog");
+      expect(tool("cursor_terminal_execute").description).toContain("not the caller's local checkout");
+      expect(tool("cursor_validate_environment_definition").description).toContain("Locally check");
+      expect(tool("cursor_get_build").description).toContain("Cloud Agent diagnostic");
+      expect(tool("cursor_publish_environment").description).toContain("local Cursor CLI to create a pull request");
+      expect(tool("cursor_export_run").description).toContain("configured local export root");
+    } finally {
+      await client.close();
+    }
   }, 30_000);
 });

@@ -36,7 +36,17 @@ export async function main(): Promise<void> {
   const client = new CursorClient({ apiKey });
   const scope = new AgentScope(client, activeProfile(policy));
 
-  const server = new McpServer({ name: "cursor-mcp", version: VERSION });
+  const server = new McpServer(
+    { name: "cursor-mcp", title: "Cursor Cloud Agents & VMs", version: VERSION },
+    {
+      instructions:
+        "This server manages Cursor Cloud Agents, their VM terminals, and associated environment/account operations. " +
+        "It is not a general local coding or research runner; honor the user's selected execution surface and established context. " +
+        "Choosing a model, repository, PR, or branch alone does not select cloud execution; local-only files and unpushed changes are not automatically transferred to a new repository-backed Cloud Agent. " +
+        "For local Cursor work, use the host's existing local Cursor agent or installed Cursor CLI, preserving the requested model; do not launch a redundant copy when already running in Cursor. " +
+        "If execution location remains ambiguous, clarify once; if the local path is unavailable, do not silently provision a cloud workspace.",
+    },
+  );
 
   const tools = [
     ...registerTerminalTools(server, policy, apiKey, undefined, scope),

@@ -185,9 +185,9 @@ export function registerRunExportTool(
   const registered = defineTool(server, policy, activeProfile(policy), {
     name: "cursor_export_run",
     config: {
-      title: "Cursor: export a run's full replay",
+      title: "Cursor Cloud: export a run's full replay",
       description:
-        "Write one terminal run's whole SSE replay to the configured export root, plus a tool-call index and terminal log. Refuses when an export exists.",
+        "Write one terminal Cloud Agent run's whole SSE replay to the configured local export root, plus a tool-call index and terminal log. Refuses when an export exists.",
       inputSchema: {
         agentId: z.string().min(1).max(128),
         runId: z.string().min(1).max(128),

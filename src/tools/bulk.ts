@@ -108,7 +108,7 @@ export function registerBulkTools(
   define({
     name: "cursor_start_bulk_job",
     config: {
-      title: "Cursor: start bulk archive/unarchive",
+      title: "Cursor Cloud: start bulk archive/unarchive",
       description:
         `Archive or unarchive up to ${settings.maxAgents} agents in the background, paced under Cursor's rate limits. Returns a job id at once; read progress with cursor_get_bulk_job.`,
       inputSchema: {
@@ -130,7 +130,7 @@ export function registerBulkTools(
   define({
     name: "cursor_get_bulk_job",
     config: {
-      title: "Cursor: bulk job status",
+      title: "Cursor Cloud: bulk job status",
       description:
         "Status and per-agent results of a bulk job. waitSeconds returns early when the job finishes.",
       inputSchema: {
@@ -163,7 +163,7 @@ export function registerBulkTools(
   define({
     name: "cursor_cancel_bulk_job",
     config: {
-      title: "Cursor: cancel bulk job",
+      title: "Cursor Cloud: cancel bulk job",
       description:
         "Stop starting new agents. Requests already sent finish; completed changes are not reverted.",
       inputSchema: { jobId: JobId },

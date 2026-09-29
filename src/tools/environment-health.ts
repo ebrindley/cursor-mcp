@@ -352,9 +352,9 @@ export function registerEnvironmentHealthTools(
   define({
     name: "cursor_assess_environment_health",
     config: {
-      title: "Cursor: assess environment health and freshness",
+      title: "Cursor Cloud: assess environment health and freshness",
       description:
-        "Judge Build health, source drift, and toolchain drift from readback you hold. Launches nothing and returns a scheduler exit code.",
+        "Locally judge Cloud Agent Build health, source drift, and toolchain drift from readback you hold. Launches nothing and returns a scheduler exit code.",
       inputSchema: HEALTH_INPUT,
       outputSchema: ASSESSMENT_OUT,
       annotations: LOCAL_READ,
@@ -380,9 +380,9 @@ export function registerEnvironmentHealthTools(
   define({
     name: "cursor_refresh_environment_toolchain",
     config: {
-      title: "Cursor: refresh environment toolchain",
+      title: "Cursor Cloud: refresh environment toolchain",
       description:
-        "Spend exactly one draft Build when toolchain drift is established. Withheld for an unchanged, stale-by-source, failing, or unproven environment.",
+        "Use a Cloud Agent delegation to request exactly one draft Build when toolchain drift is established. Withheld for an unchanged, stale-by-source, failing, or unproven environment.",
       inputSchema: {
         environment: z
           .string()

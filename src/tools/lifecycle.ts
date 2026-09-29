@@ -98,7 +98,7 @@ export function registerLifecycleTools(
 
   idTool({
     name: "cursor_archive_agent",
-    title: "Cursor: archive agent",
+    title: "Cursor Cloud: archive agent",
     description:
       "Archive an agent to hide it from the default list. Reversible; its runs and artifacts are kept.",
     annotations: REVERSIBLE,
@@ -112,7 +112,7 @@ export function registerLifecycleTools(
 
   idTool({
     name: "cursor_unarchive_agent",
-    title: "Cursor: unarchive agent",
+    title: "Cursor Cloud: unarchive agent",
     description:
       "Unarchive an agent so it shows in the default list again.",
     annotations: REVERSIBLE,
@@ -126,7 +126,7 @@ export function registerLifecycleTools(
 
   idTool({
     name: "cursor_delete_agent",
-    title: "Cursor: delete agent permanently",
+    title: "Cursor Cloud: delete agent permanently",
     description:
       "Permanently delete an agent and its run history. Irreversible, requires confirm: true, and no substitute for archive.",
     annotations: DESTRUCTIVE,

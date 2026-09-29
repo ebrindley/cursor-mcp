@@ -212,9 +212,9 @@ export function registerEnvironmentDefinitionTools(
   define({
     name: "cursor_validate_environment_definition",
     config: {
-      title: "Cursor: validate environment definition",
+      title: "Cursor Cloud: validate environment definition",
       description:
-        "Check a Cursor environment definition against the published schema. Schema errors, " +
+        "Locally check a Cloud Agent environment definition against the published schema; launches nothing. Schema errors, " +
         "safety warnings, and capability limitations are reported separately.",
       inputSchema: {
         definition: DefinitionInput,
@@ -291,9 +291,9 @@ export function registerEnvironmentDefinitionTools(
   define({
     name: "cursor_inspect_environment_definition",
     config: {
-      title: "Cursor: inspect environment definition",
+      title: "Cursor Cloud: inspect environment definition",
       description:
-        "Normalized view of a Cursor environment definition: install and start, terminals, " +
+        "Locally inspect a Cloud Agent environment definition; launches nothing. Covers install and start, terminals, " +
         "ports, MCP policy, container build paths, and snapshot input. Scripts are digests.",
       inputSchema: { definition: DefinitionInput },
       outputSchema: {
@@ -340,9 +340,9 @@ export function registerEnvironmentDefinitionTools(
   define({
     name: "cursor_diff_environment_definition",
     config: {
-      title: "Cursor: diff environment definitions",
+      title: "Cursor Cloud: diff environment definitions",
       description:
-        "Bounded semantic diff between two Cursor environment definitions. Scripts and MCP " +
+        "Locally compare two Cloud Agent environment definitions; launches nothing. Scripts and MCP " +
         "patterns are compared by digest, so no field value can leave through the diff.",
       inputSchema: { base: DefinitionInput, proposed: DefinitionInput },
       outputSchema: {

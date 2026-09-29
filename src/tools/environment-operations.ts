@@ -627,9 +627,9 @@ export function registerEnvironmentOperationTools(
   define({
     name: "cursor_publish_environment",
     config: {
-      title: "Cursor: publish environment",
+      title: "Cursor Cloud: publish environment",
       description:
-        "Create a pull request for one exactly bound personal, single-repository environment. A pull request is not persistence.",
+        "Use the configured local Cursor CLI to create a pull request for one exactly bound personal, single-repository Cloud Agent environment. A pull request is not persistence.",
       inputSchema: { environment: EnvironmentArg, ...CliConfirmationArgs },
       outputSchema: { status: z.string(), result: Block },
       annotations: PERSIST,
@@ -650,9 +650,9 @@ export function registerEnvironmentOperationTools(
   define({
     name: "cursor_delete_environment",
     config: {
-      title: "Cursor: delete environment",
+      title: "Cursor Cloud: delete environment",
       description:
-        "Dry-run, confirm, and delete one exactly bound environment, then prove absence from a complete list.",
+        "Use the configured local Cursor CLI to dry-run, confirm, and permanently delete one bound Cloud Agent environment from the account, then prove absence from a complete list.",
       inputSchema: { environment: EnvironmentArg, ...CliConfirmationArgs },
       outputSchema: { status: z.string(), result: Block },
       annotations: DESTRUCTIVE,
@@ -673,9 +673,9 @@ export function registerEnvironmentOperationTools(
   define({
     name: "cursor_inspect_environment",
     config: {
-      title: "Cursor: inspect environment",
+      title: "Cursor Cloud: inspect environment",
       description:
-        "Report an environment's identity, managed type, version, Build history, and boot Build. Active Build is unreadable.",
+        "Launch or rejoin a Cloud Agent diagnostic to report an environment's identity, managed type, version, Build history, and boot Build. Active Build is unreadable.",
       inputSchema: {
         environment: EnvironmentArg,
         environmentPublicId: DeclaredIdArg.optional(),
@@ -771,9 +771,9 @@ export function registerEnvironmentOperationTools(
   define({
     name: "cursor_list_builds",
     config: {
-      title: "Cursor: list Builds",
+      title: "Cursor Cloud: list Builds",
       description:
-        "List an environment's Builds, newest first. No buildId filter exists; page forward before concluding a row moved.",
+        "Launch or rejoin a Cloud Agent diagnostic to list an environment's Builds, newest first. No buildId filter exists; page forward before concluding a row moved.",
       inputSchema: {
         environment: EnvironmentArg,
         environmentPublicId: DeclaredIdArg.optional(),
@@ -845,9 +845,9 @@ export function registerEnvironmentOperationTools(
   define({
     name: "cursor_get_build",
     config: {
-      title: "Cursor: get Build",
+      title: "Cursor Cloud: get Build",
       description:
-        "Read one exact Build, optionally waiting for it to reach a terminal status. SUCCEEDED is not activated.",
+        "Launch or rejoin a Cloud Agent diagnostic to read one exact Build, optionally waiting for it to reach a terminal status. SUCCEEDED is not activated.",
       inputSchema: {
         environment: EnvironmentArg,
         buildId: BuildIdArg,
@@ -937,9 +937,9 @@ export function registerEnvironmentOperationTools(
   define({
     name: "cursor_get_build_logs",
     config: {
-      title: "Cursor: get Build logs",
+      title: "Cursor Cloud: get Build logs",
       description:
-        "Fetch one Build's combined install-and-setup log. Terminal Builds only carry a body; retention is about ten days.",
+        "Launch or rejoin a Cloud Agent diagnostic to fetch one Build's combined install-and-setup log. Terminal Builds only carry a body; retention is about ten days.",
       inputSchema: {
         environment: EnvironmentArg,
         buildId: BuildIdArg,
@@ -1027,9 +1027,9 @@ export function registerEnvironmentOperationTools(
   define({
     name: "cursor_trigger_build",
     config: {
-      title: "Cursor: trigger Build",
+      title: "Cursor Cloud: trigger Build",
       description:
-        "Trigger one draft Build from an environment's saved configuration. Draft Builds never become the boot Build.",
+        "Launch or rejoin Cloud Agent work to trigger one draft Build from an environment's saved configuration. Draft Builds never become the boot Build.",
       inputSchema: {
         environment: EnvironmentArg,
         environmentPublicId: DeclaredIdArg,
@@ -1154,9 +1154,9 @@ export function registerEnvironmentOperationTools(
   define({
     name: OWNER_ACTIONS_TOOL,
     config: {
-      title: "Cursor: list owner actions",
+      title: "Cursor Cloud: list owner actions",
       description:
-        "Catalog of Build and environment operations no supported authority performs: cancel, activate, deactivate, roll back, Restore, host-wide trigger. Returns the exact owner action for the ids you pass; launches nothing.",
+        "Local catalog of Build and environment operations no supported authority performs: cancel, activate, deactivate, roll back, Restore, host-wide trigger. Returns the exact owner action for the ids you pass; launches nothing.",
       inputSchema: {
         environmentPublicId: TargetIdArg.optional(),
         buildId: BuildIdArg.optional(),
@@ -1218,9 +1218,9 @@ export function registerEnvironmentOperationTools(
   define({
     name: "cursor_save_environment",
     config: {
-      title: "Cursor: save environment configuration",
+      title: "Cursor Cloud: save environment configuration",
       description:
-        "Save a validated database-managed definition through the configured Cursor CLI, or verify a Save performed through another authority.",
+        "Save a validated Cloud Agent database-managed definition to the account through the configured local Cursor CLI, or verify a Save performed through another authority.",
       inputSchema: {
         environment: EnvironmentArg.optional().describe(
           "Named structured policy binding. Required with document for a Cursor CLI Save.",
@@ -1408,9 +1408,9 @@ export function registerEnvironmentOperationTools(
   define({
     name: "cursor_qualify_environment",
     config: {
-      title: "Cursor: qualify environment",
+      title: "Cursor Cloud: qualify environment",
       description:
-        "Qualify three independent layers: prepared Build disk, Start execution, and the actual task shell.",
+        "Launch or rejoin a Cloud Agent diagnostic to qualify prepared Build disk, Start execution, and the actual task shell.",
       inputSchema: {
         environment: EnvironmentArg,
         environmentPublicId: DeclaredIdArg.optional(),

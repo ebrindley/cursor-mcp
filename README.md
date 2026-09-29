@@ -1,14 +1,16 @@
-# Cursor MCP
+# Cursor Cloud Agents & VMs
 
 An MCP server that lets Claude Code, Codex, and Grok launch and manage Cursor
-Cloud Agents. Choose which repositories they can access, launch a task, follow
-up, and inspect the reported branch or PR.
+Cloud Agents, use their VM terminals, and manage associated environments.
+It is not a general local coding or research runner. Choose which repositories
+cloud agents can access, launch a task, follow up, and inspect the reported branch or PR.
 
 No policy means read-only; enabling launches is an explicit step. This is an
 independent project, not an official Cursor product.
 
 ```text
-You: Fix the empty-search bug in ExampleOrg/ExampleRepo, starting from main.
+You: Use a Cursor Cloud Agent to fix the empty-search bug in ExampleOrg/ExampleRepo.
+     Start from main.
      Open a PR, report the result, and leave merging to me.
 Assistant: Launches a scoped cloud agent and keeps its agent/run IDs.
 You: Check its progress, then ask the same agent to cover whitespace-only input.
@@ -22,6 +24,41 @@ launch, without network requests or a key. See the [offline walkthrough][first-t
 
 [Quickstart](#quickstart) · [Client setup][setup] ·
 [Troubleshooting][troubleshooting] · [Documentation](#documentation)
+
+## Local Cursor or Cloud Agents?
+
+Choosing Composer, a repository, a PR, or a branch does not by itself choose where
+the work runs. Honor the user's selected execution surface and established context.
+
+| Request or context | Execution surface |
+|---|---|
+| Explicit local Cursor CLI or local-only working state | The intended local environment |
+| Explicit Cloud Agent/VM request, selection of this integration, or an identified cloud agent | The corresponding MCP operation |
+| Follow-up to an existing cloud agent | That agent's existing workspace |
+| Model, repository, PR or branch name without execution context | Use established context, or clarify once |
+| Local CLI or requested local model unavailable | Report the limitation; do not silently launch a Cloud Agent |
+
+For local Cursor work outside Cursor, use the installed Cursor CLI (`agent` in
+[Cursor's current documentation](https://cursor.com/docs/cli/installation);
+some installations expose `cursor-agent`). When already working inside Cursor,
+use its existing local execution mechanism rather than launching a redundant copy.
+Honor explicit requests for a separate agent or model.
+
+A new repository-backed Cloud Agent does not automatically receive local-only
+files or unpushed changes. Once cloud execution is selected, resolve the appropriate
+Git remote and available revision. A Cloud Agent model catalog does not establish
+local CLI availability or defaults.
+
+Some MCP tools inspect local environment files or make local judgments. Others use
+a configured local CLI to read or change Cursor account state, or launch remote
+diagnostics. See the [tool authority table][tools]; a local process need not have
+only local effects.
+
+The display title, server instructions and tool descriptions clarify these
+boundaries. The registration key `cursor` and `cursor_*` tool names stay unchanged,
+so some clients still show the shorter name. This is guidance, not an execution
+router or a guarantee of correct assistant selection. Existing host approvals
+and server policy remain the execution controls; this change adds no gate.
 
 ## Quickstart
 
@@ -73,8 +110,10 @@ Existing model selections and unrelated settings are preserved. To choose a mode
 use `--model ID` and optional `--fast false|true`; explicit selections are verified
 against Cursor's model catalog. No model is pinned by default.
 
-The calling assistant should resolve the current project's Git remote when a task
-needs a repository. Account-wide permission does not choose a repository for a task.
+Once cloud execution is selected, the calling assistant should resolve the current
+project's Git remote when that cloud task needs a repository. Local-only files and
+unpushed changes are not automatically included. Account-wide permission does not
+choose a repository or execution surface for a task.
 For optional restricted profiles and diagnostics, see [setup][policy-setup].
 
 ### 4. Connect your client
@@ -97,7 +136,8 @@ it from the terminal where `CURSOR_API_KEY` is exported.
 
 Ask your connected assistant:
 
-> Use Cursor to list the repositories I can access. Do not launch an agent.
+> Use the Cursor Cloud Agent integration to list the repositories I can access.
+> Do not launch an agent.
 
 Success means the assistant calls `cursor_list_repos` and returns repository
 information without a connection or authentication error. Confirm your intended
@@ -106,7 +146,7 @@ see [troubleshooting][troubleshooting] if this check fails.
 
 ### 6. Try your first task
 
-> Use Cursor to fix a small bug in OWNER/REPO, starting from main. State the target
+> Use a Cursor Cloud Agent to fix a small bug in OWNER/REPO, starting from main. State the target
 > before launching. Keep the returned agent and run IDs. Check the result and
 > report any returned PR link and remaining work. Do not merge it.
 
@@ -115,7 +155,7 @@ returns agent and run IDs; continue checking the run until it finishes. The
 policy requests automatic PR creation, but a run may finish without a PR.
 Inspect any reported branch or PR before deciding what to do next.
 
-For a follow-up: **"Ask that same Cursor agent to add the missing regression test."**
+For a follow-up: **"Ask that same Cursor Cloud Agent to add the missing regression test."**
 See the [first-task guide][first-task] for examples and resuming after a restart.
 
 ## Capabilities and limits

@@ -55,7 +55,7 @@ export function registerArtifactTools(
   define({
     name: "cursor_list_artifacts",
     config: {
-      title: "Cursor: list artifacts",
+      title: "Cursor Cloud: list artifacts",
       description:
         "List files an agent saved to its workspace artifacts directory. Code changes land on the branch, not here.",
       inputSchema: { agentId: AgentId },
@@ -92,7 +92,7 @@ export function registerArtifactTools(
   define({
     name: "cursor_get_artifact_url",
     config: {
-      title: "Cursor: get artifact download URL",
+      title: "Cursor Cloud: get artifact download URL",
       description:
         "Mint a 15-minute presigned download URL for one artifact path from cursor_list_artifacts.",
       inputSchema: {

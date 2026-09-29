@@ -75,9 +75,9 @@ export function registerAccountTools(
   define({
     name: "cursor_whoami",
     config: {
-      title: "Cursor: whoami",
+      title: "Cursor Cloud: whoami",
       description:
-        "Verify the Cursor API key and return its name, creation date, and owning email.",
+        "Verify the Cursor Cloud Agents API key and return its name, creation date, and owning email; this is not local CLI login status.",
       // No inputSchema: it advertises the same empty-object contract, but also
       // accepts a call that omits `arguments` entirely, which some clients do.
       outputSchema: {
@@ -105,9 +105,9 @@ export function registerAccountTools(
   define({
     name: "cursor_list_models",
     config: {
-      title: "Cursor: list models",
+      title: "Cursor Cloud: list models",
       description:
-        "List model ids accepted when launching a cloud agent. Omit the model to use the account default.",
+        "List model ids accepted by Cursor Cloud Agent launches, not the local Cursor CLI catalog. Omit the model to use the account default.",
       outputSchema: { models: z.array(z.string()) },
       annotations: READ,
     },
@@ -126,7 +126,7 @@ export function registerAccountTools(
   define({
     name: "cursor_list_repos",
     config: {
-      title: "Cursor: list repositories",
+      title: "Cursor Cloud: list repositories",
       description:
         "List GitHub repositories Cursor can launch an agent against. Rate limited to one call per minute.",
       outputSchema: { repos: z.array(z.string()) },
@@ -192,7 +192,7 @@ export function registerAccountTools(
   define({
     name: WORKSPACE_LIST_TOOL,
     config: {
-      title: "Cursor: list workspace controls",
+      title: "Cursor Cloud: list workspace controls",
       description:
         "List Cloud Agent workspace and account controls and whether each is supported, unverified, unsupported, or unavailable.",
       inputSchema: {
@@ -241,9 +241,9 @@ export function registerAccountTools(
   define({
     name: WORKSPACE_INSPECT_TOOL,
     config: {
-      title: "Cursor: inspect workspace",
+      title: "Cursor Cloud: inspect workspace",
       description:
-        "Inspect API-key identity, entitlement, and the workspace-control surface. Does not list repositories.",
+        "Inspect Cloud Agent API-key identity, entitlement, and workspace controls, not local CLI settings. Does not list repositories.",
       outputSchema: {
         entitlement: z
           .object({
@@ -315,9 +315,9 @@ export function registerAccountTools(
   define({
     name: WORKSPACE_GET_TOOL,
     config: {
-      title: "Cursor: get workspace control",
+      title: "Cursor Cloud: get workspace control",
       description:
-        "Read one workspace or account control. Supported controls fetch live; others return a capability result.",
+        "Read one Cloud Agent workspace or account control; model results describe cloud availability, not local CLI availability. Supported controls fetch live; others return a capability result.",
       inputSchema: {
         control: ControlId.describe("Workspace or account control to read."),
         detail: z.boolean().optional().describe("For models, include supported parameters and variants."),

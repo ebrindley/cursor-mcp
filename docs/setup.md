@@ -188,8 +188,11 @@ credentials are informational in this mode. Credentials are checked only in the
 process running doctor, not in other clients. Terminal configuration is not proof
 of a reachable VM. Optional CLI configuration is not required for terminal access.
 
-The calling assistant supplies the current project's Git remote for repository
-operations. It should ask only when the actual task target is ambiguous.
+Once cloud execution is selected, the calling assistant supplies the current
+project's Git remote for repository operations. Local-only files and unpushed
+changes are not automatically included. It asks about the repository only when
+that cloud target is ambiguous. See the [local/cloud selection rule](../README.md#local-cursor-or-cloud-agents)
+before choosing an execution surface.
 
 Account setup enables environment discovery. Without a configured CLI catalog,
 `cursor_list_environments` reports environment names and repository associations

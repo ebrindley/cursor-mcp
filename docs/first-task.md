@@ -1,6 +1,8 @@
-# Your first Cursor task
+# Your first Cursor Cloud Agent task
 
-The goal is one useful task in one approved repository. You do not need to configure
+This guide is for cloud execution. For local Cursor work, follow the
+[execution-selection guidance](../README.md#local-cursor-or-cloud-agents).
+The goal here is one useful cloud task in one approved repository. You do not need to configure
 environment operations, a local Cursor CLI, or a self-hosted worker to do that.
 
 ## Try it without an account
@@ -36,12 +38,14 @@ Demo complete. No cloud agent or PR was created; use the quickstart for real wor
 ## Launch real work
 
 Follow the [client setup](setup.md) and
-[account setup](../README.md#3-check-setup). Use the current project's Git remote
-or name the repository in your request. Your Cursor account must have access to it. Real launches may incur Cursor charges.
+[account setup](../README.md#3-check-setup). Once cloud execution is selected, use
+the current project's Git remote or name the repository in your request. Local-only
+files and unpushed changes are not automatically included. Your Cursor account must
+have access to the repository. Real launches may incur Cursor charges.
 
 Ask your assistant:
 
-> Use Cursor to fix the empty-search bug in OWNER/REPO, starting from main.
+> Use a Cursor Cloud Agent to fix the empty-search bug in OWNER/REPO, starting from main.
 > State the target before launching, retain the returned agent/run IDs, and check
 > the result. Report the PR link if one is returned. Do not merge it.
 
@@ -53,7 +57,7 @@ The quickstart requests automatic PR creation, but a task may finish without one
 
 For more work on the same conversation:
 
-> Ask that same Cursor agent to add a regression test for whitespace-only input.
+> Ask that same Cursor Cloud Agent to add a regression test for whitespace-only input.
 
 The assistant uses `cursor_create_run` with the existing agent ID and receives a
 new run ID. For cancellation, ask it to cancel the specific run, rather than

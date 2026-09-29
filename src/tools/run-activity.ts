@@ -13,7 +13,7 @@ export function registerRunActivityTool(server: McpServer, client: CursorClient,
   const registered = defineTool(server, policy, activeProfile(policy), {
     name: "cursor_tail_run",
     config: {
-      title: "Cursor: recent run activity",
+      title: "Cursor Cloud: recent run activity",
       description: "Read a bounded run activity excerpt. Pass lastEventId back to resume; without it Cursor replays from the beginning. Status is checked separately. Does not cancel the cloud run.",
       inputSchema: {
         agentId: z.string().min(1).max(128), runId: z.string().min(1).max(128),
