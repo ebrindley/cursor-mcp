@@ -16,8 +16,7 @@
       // "model": "..." // optional — omit to use provider defaults
     },
     "cursor": {
-      "enabled": true,
-      "model": "auto" // Cursor auto-selects model
+      "enabled": true
     },
   },
 
