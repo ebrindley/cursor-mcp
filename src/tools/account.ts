@@ -317,7 +317,7 @@ export function registerAccountTools(
     config: {
       title: "Cursor Cloud: get workspace control",
       description:
-        "Read one Cloud Agent workspace or account control; model results describe cloud availability, not local CLI availability. Supported controls fetch live; others return a capability result.",
+        "Read a Cloud Agent account/workspace control, not local CLI settings. Supported controls fetch live; others return a capability result.",
       inputSchema: {
         control: ControlId.describe("Workspace or account control to read."),
         detail: z.boolean().optional().describe("For models, include supported parameters and variants."),

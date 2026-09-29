@@ -973,7 +973,7 @@ export function registerAgentTools(
     config: {
       title: "Cursor Cloud: launch agent",
       description:
-        "Launch a Cursor Cloud Agent in a remote workspace, not local cursor-agent. No target defaults to a no-repository VM for launch-enabled profiles. Explicit repos or environments retain their policy checks.",
+        "Launch a Cloud Agent in a remote workspace, not local cursor-agent. No target means a no-repo VM if launches are allowed. Repo/environment checks still apply.",
       inputSchema: {
         repo: z
           .string()
@@ -1211,7 +1211,7 @@ export function registerAgentTools(
     config: {
       title: "Cursor Cloud: follow up",
       description:
-        "Send a follow-up prompt to an existing Cursor Cloud Agent, reusing its remote workspace. Does not run the local Cursor CLI. Fails with agent_busy if a run is active.",
+        "Follow up with an existing Cursor Cloud Agent in its remote workspace, not the local CLI. Fails with agent_busy while a run is active.",
       inputSchema: {
         agentId: AgentId,
         prompt: z.string().min(1),
