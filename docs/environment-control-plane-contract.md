@@ -7,7 +7,7 @@ requests as a supported integration.
 
 | Surface | Environment/Build authority |
 |---|---|
-| Published Cloud Agents API key | Agent and run lifecycle only. No published environment, Build, version, activation, restore, or rollback resources. |
+| Published Cloud Agents API key | Agent and run lifecycle; environment CRUD and history; Build list, exact get, and active boot selection. This MCP implements the environment and Build reads, not REST environment writes or Build promotion. |
 | `@cursor/sdk` | Agent lifecycle and named-environment selection at launch. No environment/Build control plane. |
 | Delegated Cloud MCP | Environment/Build reads, run-scoped proposal, test-Build trigger, and snapshot operations. Not a reusable host API. |
 | Dashboard browser session | Product UI for Save, manual Build trigger/cancel, Build activation/deactivation, and environment-version Restore. No published reusable contract. |
@@ -46,7 +46,7 @@ Do not add speculative optional receipt or version fields.
 
 | Action | Supported authority | Contract |
 |---|---|---|
-| Save database-managed environment configuration/version | Dashboard owner action (`environmentJsonPath` null) | Cloud MCP proposal may stage review content, but Save requires durable version readback. Documented to mint a version **and** fire a `CONFIG_CHANGE` Build. See [environment-save-persistence.md](./environment-save-persistence.md). |
+| Save database-managed environment configuration/version | Configured environment adapter or dashboard Save (`environmentJsonPath` null) | `cursor_save_environment` supports a configured Save or verifies a dashboard Save. Public environment create/update routes are not implemented by this tool. Cloud MCP proposal is not persistence. See [environment-save-persistence.md](./environment-save-persistence.md). |
 | Save repository-file managed environment configuration | `repo-commit` (`environmentJsonPath` present) | The configuration of record is the file at that path on the default branch. A commit is not a dashboard Save, and dashboard Save is shadowed by the committed file. |
 | Commit repository environment definition | `repo-commit` | `.cursor/environment.json`; distinct from dashboard Save and subject to documented resolution precedence. |
 | Trigger agent-requested draft Build | Delegated Cloud MCP | `trigger-environment-build`, implicitly scoped to the current run's environment. Do not infer a host route from the tool name. Contract proven 2026-08-29; see [environment-build-operations.md](./environment-build-operations.md). |
@@ -84,12 +84,12 @@ Future adapter changes must establish these independently:
 - cancellable-state and terminal Build readback for Build cancel — still
   unproven; no delegated cancel operation exists to readback against;
 - expected-current and resulting active Build for activate/deactivate —
-  **specified but blocked on active-Build readback** as of 2026-08-29;
+  active boot selection is now readable; mutation and read-your-write semantics remain unimplemented;
 - source and resulting environment-version ids for Restore — likewise blocked;
 - separate Build and environment-version rollback semantics;
 - conflict, idempotency, authorization, and audit behavior.
 
-See "Activation, restoration, and rollback" below for the blocking triad and the
+See "Activation, restoration, and rollback" below for the remaining limits and the
 per-operation residual shapes.
 
 Keep identifier types separate:
@@ -113,7 +113,7 @@ claiming success:
   "environmentPublicId": "<environment-id>",
   "environmentVersionPublicId": "<optional-version-id>",
   "buildId": "<optional-build-id>",
-  "reason": "No published API-key, SDK, or delegated Cloud MCP authority for this action.",
+  "reason": "This action has no configured programmatic path in this MCP.",
   "requiredReadback": "<durable version, terminal Build status, or active Build id>"
 }
 ```
@@ -134,44 +134,42 @@ dashboard.
 ## Activation, restoration, and rollback
 
 Activation requires both a supported write authority and exact active-Build
-readback. The supported adapters provide neither.
+readback. `cursor_get_active_build` provides boot-selection readback; the MCP
+has no Build activation write.
 
 | Question | Answer on supported authorities |
 |---|---|
 | Make a qualified successful Build active by exact `buildId`? | **No.** No activate or promote operation exists on the API key, the SDK, or the delegated census. |
-| Restore the previous active Build by exact `buildId`? | **No.** No rollback primitive on those authorities, and the predecessor cannot be recorded. |
+| Restore the previous active Build by exact `buildId`? | **No.** Current selection can be recorded before a change, but no rollback write is implemented. |
 | Restore a previous environment version by exact `environmentVersionPublicId`? | **No** as a reusable contract on those authorities. |
-| Read the active Build authoritatively? | **No** on the delegated surface: no field named `active`, `latest`, or `currentRun`. |
+| Read the active Build authoritatively? | **Yes**, through `cursor_get_active_build`: a Build id or `universal_image`. Delegated inspection still cannot read active state. |
 
 Each answer above is scoped to the authorities this project may use.
 
 Keep three layers separate: the **product capability** is documented in the
-dashboard; the **exact-id supported contract** is absent on every programmatic
-authority; the **implementation** is therefore unjustified. Absence on these
-authorities is not a claim that Cursor lacks the capability.
+dashboard; the **exact-id activation write contract** is absent on the
+programmatic authorities used here; the MCP provides dashboard instructions
+for activation. Active boot-selection reads do not supply that write contract.
 
-### Why no experiment was run
+### August 2026 activation decision
 
-Three preconditions fail independently, each sufficient on its own:
+At that time, three preconditions failed independently:
 
-1. **The predecessor cannot be proven active.** An id can be declared out of
-   band, but no surface can show it *is* the active Build.
+1. **The predecessor could not be proven active.** An id could be declared out of
+   band, but the available reads did not establish it as the active Build.
    `environment-info.build.buildId` is the Build the pod booted from. A
    `SUCCEEDED` row is not an active Build. Any mutation would therefore be
    irreversible by construction.
-2. **"Qualified" and "non-current" are not computable client-side.** Build rows
-   carry no promotability flag, no `isDraft`, no ref, and no commit SHA.
+2. **"Qualified" and "non-current" were not computable from the readback.** The
+   Build rows in that census had no promotability flag, `isDraft`, ref, or commit SHA.
    Promotability is defined by the trigger contract as built from every
    repository's default branch — a property absent from the row.
-3. **No activation write exists** on the API key, the SDK, or the 14-tool
+3. **No activation write was available** through the API key, SDK, or 14-tool
    delegated census.
 
-Consequently, **even if Cursor exposed an activate endpoint on a supported
-authority tomorrow with no other change, this project still could not safely
-target it.** The readback gap is binding, not merely the missing verb.
-
-The readback gap is scoped to this project's supported programmatic authorities;
-it does not establish what is available elsewhere in Cursor's product.
+Current API reads provide active boot selection and a Build's draft flag.
+They do not establish promotability, repository revisions, or activation write
+semantics. Use the dashboard for activation.
 
 A missing active-Build field or mutation verb cannot be supplied by inference.
 Return the existing owner action before any unverifiable mutation.
@@ -253,15 +251,15 @@ environment, or ambiguous, refuse with a client error. Emit `ACTIVATE_BUILD` or
 - `RESTORE_ENVIRONMENT_VERSION` carries `environmentVersionPublicId`. The
   Build-family actions must never carry one, and no residual ever carries the
   numeric `builds[].environmentVersionId`.
-- Build-family residuals carry `activeBuildReadable: false` together with an
+- This residual path does not read active state. Build-family residuals carry
+  `activeBuildReadable: false` together with an
   explicit `expectedActiveBuildId: null`. Never omit it: a dated dashboard
   observation of a blank Active Build field is ambiguous between "none active"
   and "not shown to you", so omission would let a consumer read absence as "none
   active".
 - `ROLLBACK_BUILD` additionally carries `supersededBuildId` to preserve intent,
   since the dashboard gesture is identical to Activate. Its predecessor field
-  must be null with a reason today; emitting a predecessor described as proven
-  active would be a fabrication.
+  remains null with a reason because this path performs no active-state read.
 - Never present `ROLLBACK_BUILD` and `RESTORE_ENVIRONMENT_VERSION` as
   interchangeable alternatives.
 - Never emit a `SUCCEEDED` status, a `userFacingSnapshotId`, or

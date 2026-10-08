@@ -928,9 +928,9 @@ function limitationsFor(source: DefinitionSource): CapabilityLimitation[] {
     {
       code: "NO_HOST_PERSISTENCE",
       message:
-        "This is a local check. Persisting a definition is an owner Save (database-managed) " +
-        "or a commit of the file to the default branch (repository-file managed); no published " +
-        "API-key, SDK, or delegated operation saves Install/Start configuration.",
+        "This check validates the definition without saving it. Use cursor_save_environment " +
+        "for database-managed environments or commit the definition to the default branch " +
+        "for repository-file environments.",
     },
   ];
   if (source === "delegated-saved") {

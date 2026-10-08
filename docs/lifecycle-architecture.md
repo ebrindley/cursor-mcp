@@ -129,17 +129,17 @@ never Install/Start text and never a `buildId`.
 
 | Operation | Planned tool | Classification |
 |---|---|---|
-| Inspect environment | `cursor_inspect_environment` | Delegated reads `observed`; API-key environment routes `unavailable`. |
-| List / inspect Builds | `cursor_list_builds`, `cursor_get_build` | Delegated list `observed`; no `buildId` filter; no active/latest/currentRun field. |
+| Inspect environment | `cursor_inspect_environment` | Delegated diagnostic; active state stays unreadable in that report. Saved-environment list/configuration/history use separate API-key tools. |
+| List / inspect Builds | `cursor_list_builds`, `cursor_get_build`, `cursor_get_active_build` | API-key reads: paginated list, exact Build, and active boot selection. |
 | Build logs | `cursor_get_build_logs` | Delegated `observed`; text; untrusted; terminal-only body. |
 | Trigger Build | `cursor_trigger_build` | Delegated draft trigger `observed` (non-activating, no retry). General manual Build is `manual-only`. |
 | Cancel Build | `cursor_list_owner_actions` row | `manual-only` (`CANCEL_BUILD`). Run cancel must not substitute. No verb is registered; the catalog carries the owner action. |
 | Qualify | `cursor_qualify_environment` | Three independent layers: prepared Build disk, Start execution, task shell. |
-| Save / synchronize | `cursor_save_environment` | Database-managed: `manual-only` (`SAVE_ENVIRONMENT`). Repository-file: `repo-commit` of `.cursor/environment.json`. Proposal is not Save. |
-| Activate / deactivate | `cursor_list_owner_actions` rows | `manual-only`. Blocked on missing verb **and** unreadable active Build. Catalog rows, not verbs. |
+| Save / synchronize | `cursor_save_environment` | Database-managed: configured adapter Save or dashboard Save verification. Repository-file: `repo-commit` of `.cursor/environment.json`. Proposal is not Save. |
+| Activate / deactivate | `cursor_list_owner_actions` rows | `manual-only`: no activation write. Active boot selection is separately readable. |
 | Restore version | `cursor_list_owner_actions` row | `manual-only`. Distinct resource from Build rollback. |
 | Roll back Build | `cursor_list_owner_actions` row | `manual-only`. Exact prior `buildId` only; never guessed. |
-| Bounded lifecycle | `cursor_run_environment_lifecycle` | Thin in-process composition of the rows above, plus monitor, dry-run, confirm, timeout, cancel, and rollback. No durable state. |
+| Bounded lifecycle | `cursor_run_environment_lifecycle` | Planning and owner guidance only; returns `PLANNING_ONLY` for lifecycle execution. Atomic tools remain independent. |
 
 `cursor_trigger_build` may exist as a real mutation for the proven draft path
 and still return `TRIGGER_BUILD` for a non-draft / host-wide Build. One tool,
@@ -284,25 +284,24 @@ predecessor, never an implicit inverse and never environment-version Restore.
 
 | Stage | Meaning | Authoritative readback |
 |---|---|---|
-| inspect | Environment identity, managed type, current version, Build history, current-run Build. Active Build only if readable. | `environmentPublicId`, `environmentVersionPublicId`, Build rows. Active Build is currently unreadable. |
+| inspect | Environment identity, managed type, current version, Build history, current-run Build. Active Build only if readable. | `environmentPublicId`, version identity, Build rows. `cursor_get_active_build` separately reads active boot selection. |
 | validate | Local definition is schema-legal and safe enough to propose. | Schema result; safety warnings distinct from errors. |
 | synchronize | Persist the definition. Database-managed: owner Save. Repository-file: default-branch commit. | New `environmentVersionPublicId` after Save; commit SHA is not present on delegated Build objects. Proposal echo is not persistence. |
 | build | Prepare a bootable disk. Draft trigger is the only proven programmatic write. | Exact `buildId` row to a terminal `status`. `SKIPPED` is terminal and consumes the trigger budget. |
 | qualify | Three layers, independently. A pass on disk is not a pass on Start or the task shell. | Structured layer results. `get-events` empty is indeterminate, not failed. |
-| activate | Make a qualified successful promotable Build the Build new agents boot from. | Authoritative active Build equal to the exact `buildId`. **Currently impossible** on supported authorities. |
+| activate | Make a qualified successful promotable Build the Build new agents boot from. | Readable through `cursor_get_active_build`; use the dashboard to activate a Build. |
 | verify | Confirm the environment still matches the intended version and active Build. | Same readback as inspect after the mutation. |
 
-`cursor_run_environment_lifecycle` is the bounded in-process composition of
-these stages (plus monitor) and of the cancel / rollback side paths. It is not
-a durable workflow engine: nothing is stored, a failed prerequisite stops later
-mutations, and every atomic tool stays independently usable. Unsupported steps
-are recorded as residuals, never as completed.
+`cursor_run_environment_lifecycle` plans these stages and returns owner guidance
+for cancel and rollback. It does not execute the sequence. Every atomic tool
+stays independently usable; unsupported steps are never reported as completed.
 
 ## Fail-closed behavior
 
 1. **No speculative writes.** Without a supported non-browser authority,
-   return a capability residual. Do not probe `/v1/environments`, `/v1/builds`,
-   Cloud MCP tool names as host routes, or dashboard cookies.
+   return a capability residual. Do not invent write routes, use Cloud MCP tool
+   names as host routes, or replay dashboard cookies. Documented environment
+   and Build GET routes serve the public read tools.
 2. **No write retry after dispatch.** Trigger, Save, activate, restore, rollback,
    and create inherit the existing client rule: a write is never retried.
    Delegated `trigger-environment-build` has no idempotency key; retry only when
@@ -322,8 +321,8 @@ are recorded as residuals, never as completed.
    apply; fail if either is unmet or if attached repositories cannot be read
    back.
 8. **Active Build unreadable** blocks any implementation of activate, deactivate,
-   or rollback, even if a verb appears later without a read. The blocking triad
-   in the control-plane contract still applies.
+   or rollback when a read fails. Successful boot-selection reads alone do not
+   supply the missing mutation contract.
 
 ## Transport invariants
 
@@ -351,7 +350,7 @@ sole authority for a high-impact mutation when independent readback exists.
 caller
   → MCP tools (Cursor domain)
     → policy + scope
-      → CursorClient          # proven API-key path (agents, runs, artifacts)
+      → CursorClient          # API-key paths (agents, runs, artifacts, environment/Build reads)
       → capability residual   # manual-only / unavailable / uncertain
       → (later) delegated run # only for Cloud MCP operations with supported contracts
 ```
@@ -404,24 +403,25 @@ contract, not a hope that a later dashboard click will become an API.
 A caller wants a new or empty named environment to become the boot image for
 future agents.
 
-1. **inspect** — if a delegated read is available, return identity, managed type,
-   version, and Build history. Active Build is `readable: false`. If no
+1. **inspect** — the delegated diagnostic returns identity, managed type,
+   version, and Build history, with active Build `readable: false` in that report.
+   Saved configuration and active boot selection have separate REST read tools. If no
    environment exists yet, that is an inspect result, not a bootstrap from a
    hardcoded repository.
 2. **validate** — local `.cursor/environment.json` or a proposed document.
    Schema errors ≠ safety warnings ≠ capability limits.
-3. **synchronize** — database-managed: `SAVE_ENVIRONMENT` residual with
-   `requiredReadback` = new `environmentVersionPublicId`. Repository-file:
+3. **synchronize** — database-managed: configured adapter Save or a dashboard Save
+   with version readback. Repository-file:
    tell the caller to commit the file; this MCP does not git-push.
 4. **build** — after Save, Cursor may fire `CONFIG_CHANGE` itself. An
    agent-requested draft Build is the proven programmatic trigger and **does
    not activate**. A host-wide manual Build is `TRIGGER_BUILD`.
 5. **qualify** — wait for exact `buildId` terminal status, then the three
    layers. `FAILED` stops the lifecycle; the prior active Build is not claimed
-   preserved because it was not readable.
+   preserved because this qualification step does not read active state.
 6. **activate** — `ACTIVATE_BUILD` residual. `SUCCEEDED` is not activation.
-7. **verify** — re-inspect. Report unverified active state rather than
-   inferring invariance.
+7. **verify** — re-inspect and read active boot selection separately. Do not
+   infer active-state invariance from a draft Build result.
 
 No customer name, repository, or bootstrap script is in this path.
 

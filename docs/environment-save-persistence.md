@@ -1,24 +1,26 @@
 # Environment Save and version persistence
 
-Reference for the supported environment adapter, based on the delegated contracts
-checked in August 2026. Examples use placeholders. Observed fields are not a
-guarantee of future upstream behavior.
+Reference for environment persistence. The delegated observations below are from
+August 2026; public API capabilities and current MCP behavior are distinguished
+in the decision below. Examples use placeholders.
 
 ## Decision
 
-**No published API-key, `@cursor/sdk`, or delegated Cloud MCP operation persists
-Install/Start configuration.** A live 14-tool census contains no save, restore,
-activate, deactivate, persist, update-environment, or commit-environment tool.
-The OpenAPI still exposes no environment, build, or version paths.
+The public API supports creating saved environments and replacing their
+configuration through `POST /v1/environments` and `PATCH /v1/environments/{id}`.
+This MCP implements REST environment reads; its Save tool uses the configured
+environment adapter or verifies a dashboard Save. It does not perform REST
+configuration writes. The August delegated census had no Save operation;
+`propose-environment-json` remains a proposal, not persistence.
 
-Persistence is an owner authority, selected by managed type:
+The MCP's persistence path depends on managed type:
 
 | Managed type | Discriminator | Persisting operation | Authority |
 |---|---|---|---|
-| Database-managed | `environmentJsonPath` is null | Dashboard Save | `browser-session` |
+| Database-managed | `environmentJsonPath` is null | Configured adapter Save, or dashboard Save with readback | `cursor-cli` or `browser-session` |
 | Repository-file managed | `environmentJsonPath` present, defaulting to `.cursor/environment.json` | Commit that file to the **default** branch | `repo-commit` |
 
-Classify **only** from `environment-info.environmentJsonPath`. Never probe
+On the delegated path, classify from `environment-info.environmentJsonPath`. Never probe
 managed type by passing `environmentJson` to `trigger-environment-build`: on a
 database-managed environment that call succeeds and burns a real Build.
 
@@ -40,7 +42,7 @@ trap most likely to produce a false "saved" claim.
 | Thing | Authority | Mints a version? | Build effect | Returned id |
 |---|---|---|---|---|
 | **Proposal** | `propose-environment-json` | No | None | **None** |
-| **Save** | `browser-session`, database-managed | Expected new `environmentVersionPublicId` | Documented `triggerType=CONFIG_CHANGE` | Not programmatically observable |
+| **Save** | Configured adapter or `browser-session`, database-managed | Expected new `environmentVersionPublicId` on delegated readback | Documented `triggerType=CONFIG_CHANGE` for dashboard Save | REST get separately reports the latest `versionId` when available |
 | **Repository synchronization** | `repo-commit` to the default branch | **Unknown** | Unproven | Commit SHA, absent from delegated Build objects |
 | **Version creation** | Consequence of Save | — | — | `environmentVersionPublicId`, plus a new numeric `builds[].environmentVersionId` |
 | **Build trigger** | Delegated draft, dashboard, schedule, or configuration change | No; a draft trigger reused the existing numeric version | Creates a Build row | `buildId`, `isDraft` |
@@ -243,7 +245,7 @@ unknown write outcome fails closed and is resolved by readback only.
 
 ## Residual owner action
 
-Database-managed:
+Database-managed, when the configured Save path is unavailable:
 
 ```json
 {
@@ -252,7 +254,7 @@ Database-managed:
   "authority": "browser-session",
   "environmentPublicId": "<environment-id>",
   "environmentVersionPublicId": "<baseline-version-id>",
-  "reason": "No published API-key, SDK, or delegated Cloud MCP save operation. Live census contains no save tool, and propose-environment-json records a proposal only.",
+  "reason": "This request did not save configuration. Use a configured Save operation or the environment dashboard. A delegated proposal does not persist configuration.",
   "requiredReadback": "a new environmentVersionPublicId on a freshly booted run, plus a list-environment-builds row with triggerType=CONFIG_CHANGE and an environmentVersionId absent from the recorded baseline set"
 }
 ```
@@ -281,7 +283,9 @@ Do not add speculative receipt or version fields.
 
 | Path | Verdict |
 |---|---|
-| Save through API key, SDK, or delegated Cloud MCP | **NO-GO** — emit `SAVE_ENVIRONMENT` |
+| REST environment configuration writes | Public create/update routes exist; not implemented by this MCP |
+| Save through delegated Cloud MCP | **NO-GO** — proposal is not persistence |
+| Save through the configured environment adapter | **GO** with its existing grants, preview, confirmation, and readback |
 | Proposal as persistence | **NO-GO** — it is not Save |
 | `trigger-environment-build` with `environmentJson` as Save | **NO-GO** — Build-scoped only, and rejected for repository-file environments |
 | Dashboard Save on a repository-file environment | **NO-GO** — the committed file wins |

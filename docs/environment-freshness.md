@@ -154,9 +154,9 @@ The only supported trigger produces a **draft** Build. So:
   before or after the call. Nothing in this path activates, deactivates, saves, or
   restores anything.
 
-Active state is unreadable on every authority this project may use, so `HEALTHY`
-describes Build history and never what new agents boot from. `activeBuild` is
-always `{ readable: false }` with the reason attached, never omitted.
+This health and refresh path does not read active state, so `HEALTHY` describes
+Build history. Its `activeBuild` stays `{ readable: false }` with the reason
+attached. Use `cursor_get_active_build` separately to read new-agent boot selection.
 
 ## Running it from a scheduler
 

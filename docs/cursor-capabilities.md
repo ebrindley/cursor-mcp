@@ -1,6 +1,7 @@
 # Cursor capability reference
 
-Baseline checked on 2026-08-28. This document is organized by Cursor capability,
+Baseline checked on 2026-08-28; environment and Build REST coverage updated on
+2026-10-08. This document is organized by Cursor capability,
 not by transport. It records what implementers can rely on now and which lifecycle
 questions still require bounded discovery. The caller-facing architecture that
 consumes these labels is [lifecycle-architecture.md](./lifecycle-architecture.md).
@@ -201,7 +202,9 @@ from the public read surface.
 | Configuration-change Build | Save environment or change relevant configuration | `documented` |
 | Manual Build | Dashboard `Trigger build` | `documented`; browser-session owner action |
 | Agent-requested draft Build | Cloud MCP | `documented`, `observed`; draft and non-activating by the tool's own contract |
-| List Builds and logs | Dashboard and Cloud MCP | `documented`, `observed` for delegated-run; no `buildId` filter; published API-key surface unavailable |
+| List / get Builds | Public API | `documented`, `observed`; implemented by `cursor_list_builds` and `cursor_get_build` |
+| Active boot selection | Public API | `documented`, `observed`; `cursor_get_active_build` returns a Build id or the default image |
+| Build logs | Cloud MCP | Delegated read through `cursor_get_build_logs` |
 | Skip unchanged recurring Build | Cursor service | `documented`, `observed` |
 | Cancel in-progress Build | Dashboard | `documented`; absent from a live delegated tool census, and no published API-key or SDK authority. |
 | Activate/deactivate Build | Dashboard | `documented`, `browser-session`; absent from the live tool census. Only Builds from every repository's default branch are promotable, and **delegated** Build rows expose no promotability flag, ref, or commit SHA |
@@ -209,18 +212,18 @@ from the public read surface.
 | Restore environment version | Dashboard | `documented`, `browser-session`; "Restore from version history to make a prior environment version active again". Absent from the live tool census |
 | Configure base snapshot | Environment schema and setup UI | `documented`; this is an environment-definition input |
 | Take/check snapshot operation | Cloud MCP | `documented`; check requires a snapshot-operation id, which a read-only inspection may not have |
-| Save proposed install/start | Configured compatible Cursor CLI, or dashboard owner action | CLI database Save requires its own grant and configuration readback; Cloud MCP proposal is not persistence. Repository-file managed environments persist by `repo-commit` instead; see [the operation reference](./reference.md#tools) |
+| Save proposed install/start | Public environment create/update; configured adapter or dashboard Save | REST writes are documented but not implemented by this MCP. Its configured Save path retains its grants and readback. Cloud MCP proposal is not persistence; repository-file environments use `repo-commit`. See [the operation reference](./reference.md#tools). |
 
 Builds preserve disk state, not running processes, shell exports, or in-memory
 caches. A failed Build does not displace the last successful active Build.
 Recurring Builds can be skipped when relevant inputs did not change; manual and
 configuration-triggered Builds still run.
 
-Build status has no published stable enum. The delegated read model observed
-`IN_PROGRESS`, `SUCCEEDED`, `FAILED`, and `SKIPPED`; `CANCELLED` is accepted as
-a list filter value even though no delegated operation can produce it. Preserve
-unknown future strings. Skipping was encoded in `status`, not a separate
-boolean, and a failure reason appears in `failureType`.
+The public Build schema lists `IN_PROGRESS`, `SUCCEEDED`, `FAILED`, `CANCELLED`,
+and `SKIPPED`; the adapter preserves unknown future strings. Delegated filtering
+also accepts `CANCELLED`, although the delegated surface has no cancel operation.
+Skipping is encoded in `status`; public failure data is also projected as
+`failureType` for existing consumers.
 
 Build trigger, monitoring, log, and cancellation semantics are recorded in
 [environment-build-operations.md](./environment-build-operations.md).

@@ -741,8 +741,7 @@ export function notConfiguredCapability(): CliCapability {
     compatible: false,
     commands: [],
     reason:
-      "No Cursor CLI is configured. Global environment discovery has no published API-key contract, " +
-      "so without a CLI this read has no authority at all.",
+      "No Cursor CLI is configured for this environment operation.",
     nextSteps: [
       "Set `cursorCli.path` to the absolute path of a Cursor CLI you have checked, and list its version in `cursorCli.compatibleVersions`.",
     ],

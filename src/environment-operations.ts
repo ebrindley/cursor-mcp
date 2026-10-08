@@ -1280,11 +1280,8 @@ export function saveEnvironmentResidual(args: {
       environmentPublicId: args.environmentPublicId,
       ...version,
       reason:
-        "No published API-key, SDK, or delegated Cloud MCP save operation exists. A live " +
-        "delegated tool census contained no save, restore, activate, or deactivate tool, and " +
-        "propose-environment-json records owner-visible review state without persisting " +
-        "anything. Save is documented to mint a version and fire a CONFIG_CHANGE Build, so it " +
-        "is not a cheap metadata write.",
+        "This request did not save configuration. Use a configured Save operation or the " +
+        "environment dashboard. A delegated proposal does not persist configuration.",
       requiredReadback: SAVE_READBACK,
       nextSteps: [
         "Open the pre-declared environment, verified out of band rather than through a URL a run reported, and discard any stale pending proposal.",
@@ -1889,10 +1886,8 @@ function activeBuildReadback(buildId: string): string {
 /**
  * Making an exact Build the one new agents boot from.
  *
- * Two legs of the blocking triad are missing at once, and the reason says so:
- * there is no activate verb on a supported authority, and no authoritative
- * active-Build read to confirm one with. A verb arriving without the read would
- * still be unimplementable.
+ * This residual provides activation instructions. Current boot selection is
+ * available separately through cursor_get_active_build.
  */
 export function activateBuildResidual(args: {
   environmentPublicId: string;
@@ -1904,14 +1899,11 @@ export function activateBuildResidual(args: {
     environmentPublicId: args.environmentPublicId,
     buildId: args.buildId,
     reason:
-      "No activate or promote operation exists on the published API key, the SDK, or a live " +
-      "delegated tool census, and no authoritative active-Build read exists on those " +
-      "authorities, so a promotion could be neither performed nor confirmed. SUCCEEDED is not " +
-      "activation, and environment-info.build.buildId is a run's boot provenance.",
+      "This tool does not activate Builds. SUCCEEDED is not activation.",
     requiredReadback: activeBuildReadback(args.buildId),
     nextSteps: [
       "Activate that exact buildId from the environment dashboard, where active state is shown.",
-      "Record the currently active Build out of band first: it cannot be read here, so no rollback target can be preserved for you.",
+      "Read and record the current boot selection with cursor_get_active_build before changing it.",
       "Do not read a later successful recurring or CONFIG_CHANGE Build as this activation: pin durability is unpublished.",
     ],
   });
@@ -1933,10 +1925,8 @@ export function deactivateBuildResidual(args: {
     environmentPublicId: args.environmentPublicId,
     buildId: args.buildId,
     reason:
-      "No deactivate operation exists on the published API key, the SDK, or a live delegated " +
-      "tool census, and the active Build is unreadable on those authorities. Deactivate also " +
-      "names no replacement: the resulting selection is unspecified, so it is not the inverse " +
-      "of Activate.",
+      "This tool does not deactivate Builds. Deactivation names no replacement, so it is " +
+      "not the inverse of activation.",
     requiredReadback:
       `an authoritative active-Build read on the same authority showing ${args.buildId} is ` +
       "no longer active and reporting the resulting selection, with unreadable distinct from none active",
@@ -1951,9 +1941,8 @@ export function deactivateBuildResidual(args: {
  * Returning to an explicitly named prior Build.
  *
  * `supersededBuildId` preserves the caller's intent, because the dashboard
- * gesture is identical to Activate. The predecessor field stays null with a
- * reason: emitting a predecessor described as proven active would be a
- * fabrication, since no authority here can read active state.
+ * gesture is identical to Activate. This residual performs no active-state
+ * read, so its predecessor field stays null with a reason.
  */
 export function rollbackBuildResidual(args: {
   environmentPublicId: string;
@@ -1970,9 +1959,8 @@ export function rollbackBuildResidual(args: {
       ? {}
       : { supersededBuildId: args.supersededBuildId }),
     reason:
-      "Build rollback is not a published primitive. Its only honest meaning is activating a " +
-      "prior successful, promotable buildId without changing saved configuration, and no " +
-      "activate operation or authoritative active-Build read exists on a supported authority.",
+      "This tool does not roll back Builds. Rollback activates an explicitly selected prior " +
+      "successful, promotable Build without changing saved configuration.",
     requiredReadback: activeBuildReadback(args.buildId),
     nextSteps: [
       "Activate that exact prior buildId from the environment dashboard; never select by recency or by newest-successful.",

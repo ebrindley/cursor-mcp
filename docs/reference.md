@@ -67,9 +67,9 @@ writable by a tool. Default location `~/.config/cursor-mcp/policy.json`, overrid
   profile must also name the tool, because `read:*` is a grant to read Cursor and never a
   grant to write local files. A relative path is refused rather than resolved against
   whatever directory the host happened to launch the server in.
-- `cursorCli` — an optional local Cursor CLI, used as a separate read authority for global
-  environment discovery. Absent is the normal state and everything else keeps working
-  without it. Present grants nothing on its own: `environmentReads`, `publishEnabled`,
+- `cursorCli` — the optional adapter used by environment publication, Save, and deletion.
+  Saved-environment discovery and configuration reads use REST without this adapter.
+  Present grants nothing on its own: `environmentReads`, `publishEnabled`,
   `databaseSaveEnabled`, and `deleteEnabled` are independent gates inside the block;
   `teamWritesEnabled` is an additional gate for team scope. The legacy
   `environmentWrites` field grants no operation.
@@ -269,14 +269,14 @@ a complete lossless post-list. No write retries or falls back after dispatch: an
 result is `STATE_UNKNOWN`. Team writes need `teamWritesEnabled`, and the compound
 delete-personal-on-team-write option is never exposed.
 
-**Seven environment operations run inside a delegated agent, and that is not free.**
-Cursor's environment and Build control plane is only reachable from a run attached to the
-environment, so each of these tools launches one credential-free agent there, gives it one
-scripted mission, and reads back one structured document. That launch is a
+**Delegated environment diagnostics launch paid cloud work.**
+Inspection, Build logs, draft triggering, and qualification use a bounded agent mission
+in the selected environment. Saved-environment catalog/configuration/history and Build
+list/get/active reads use REST without launching an agent. Each delegated launch is a
 secrets-and-egress grant: the environment must be listed under `profiles.*.environments`,
 every repository Cursor reports attaching must be listed under `profiles.*.repos`, and a
-profile that pins `autoCreatePR: true` refuses delegation outright. None of those seven is
-annotated read-only, so `read:*` grants none of them. Builds take minutes, so a call does
+profile that pins `autoCreatePR: true` refuses delegation outright. Delegated operations are not
+annotated read-only, so `read:*` does not grant them. Builds take minutes, so a call does
 not block: it returns `DELEGATION_PENDING` with a `resume` handle you pass back, and nothing
 is remembered for you between those calls beyond an in-process resume handle. Build
 logs come back without their body unless you pass `includeText: true`: install scripts
@@ -289,9 +289,9 @@ you pass filled in, and launches nothing. Everything a delegate says is labeled
 `delegated-untrusted` and leaves through the same fence as any other Cursor text.
 
 **Save is a tool; Restore, activate, deactivate, and roll back are catalog rows.**
-No published API-key, SDK, or delegated operation persists Install/Start or promotes a
-Build. `cursor_save_environment` is the one with a real path: through a configured Cursor
-CLI it performs a database-managed Save, and for a repository-file managed environment it
+The public API supports saved-environment create/update, but this MCP does not implement
+those REST writes. `cursor_save_environment` uses a configured Cursor CLI for a
+database-managed Save, and for a repository-file managed environment it
 reports the default-branch commit of that file to make (this server does not write your
 repository), stopping rather than guessing when `environmentJsonPath` is unknown. The
 others each return a row from `cursor_list_owner_actions` with the exact owner action and
@@ -306,8 +306,9 @@ it is reserved for a promotion authority that has not appeared. Pass `verify` to
 `cursor_save_environment` to judge a Save an owner performed: a configuration-change Build
 is adopted only when it is the sole candidate in an attested exclusive change window,
 absent from the recorded Build and numeric-version baselines, and a version comparison
-counts only from a freshly booted run. The saved document itself stays owner-restricted, so
-persistence is never reported as a content match.
+counts only from a freshly booted run. That delegated readback may withhold the saved
+document, so it cannot establish a content match. The separate configuration read
+returns digests when REST supplies content.
 
 **A successful Build is not the active Build.** `cursor_get_active_build` reads the
 current boot selection through the public API. Delegated inspection still reports
@@ -351,7 +352,8 @@ environment, a failing pipeline, an unsaved definition change, and incomplete ev
 dispatch nothing and say why before a VM exists. Because the Build is a draft, a refresh
 proves what a fresh Install produces and does not deliver it: activation stays an owner
 action. A response proving `isDraft=true` establishes only that the refresh does not
-become the Build new agents boot from; active state itself remains unreadable.
+become the Build new agents boot from. This refresh path does not read active state;
+`cursor_get_active_build` provides that read separately.
 `docs/environment-freshness.md` records the whole contract.
 
 **The lifecycle tool plans and returns owner guidance.**

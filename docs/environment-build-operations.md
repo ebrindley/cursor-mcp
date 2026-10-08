@@ -1,20 +1,19 @@
 # Environment Build operations
 
-Reference for the supported environment adapter, based on the delegated contracts
-checked in August 2026. Examples use placeholders. Observed fields are not a
-guarantee of future upstream behavior.
+Current Build reads use the public API. The delegated trigger and log contracts
+below record August 2026 observations. Examples use placeholders.
 
 ## Per-operation authority
 
 | Operation | Authority | Status |
 |---|---|---|
-| List Builds | `delegated-run` `list-environment-builds` | Supported; **no `buildId` filter** |
-| Monitor an exact Build | `delegated-run` `list-environment-builds` | Supported by client-side match, not by server-side filter |
+| List Builds | API-key `cursor_list_builds` | Paginated public read |
+| Monitor an exact Build | API-key `cursor_get_build` | Exact-id public read with bounded polling |
 | Build logs | `delegated-run` `environment-build-logs` | Supported for an exact `buildId` |
 | Trigger a draft Build | `delegated-run` `trigger-environment-build` | Supported; draft, non-activating by its own contract |
 | Cancel an in-progress Build | none | `OWNER_ACTION_REQUIRED` / `CANCEL_BUILD` |
 | Activate / deactivate a Build | none | Owner action; not supported by this adapter |
-| Read the active Build | none | Not in the delegated schema |
+| Read the active Build | API-key `cursor_get_active_build` | Build id or default image; delegated inspection still lacks this read |
 
 ## Live tool census
 
@@ -80,7 +79,11 @@ grammar.
 
 ## Monitoring
 
-`list-environment-builds` has **no `buildId` filter**. Its parameters are
+`cursor_get_build` reads an exact Build through REST and optionally polls it.
+`cursor_list_builds` returns one API page; follow `nextCursor` even when a status
+filter leaves the page empty. See [Public Build reads](reference.md#public-build-reads).
+
+The delegated `list-environment-builds` has **no `buildId` filter**. Its parameters are
 `statuses`, `createdAfter`, `createdBefore`, `cursor`, and `limit` (default 25,
 max 100), and it returns newest first with an opaque `nextCursor` when
 `hasMore` is true. Monitoring one Build therefore means listing and matching
@@ -247,12 +250,13 @@ the repository list, the full environment JSON, a dashboard link,
 | Operation | Verdict |
 |---|---|
 | Trigger a draft Build from saved configuration | **GO**, delegated-run only, one call, no retry |
-| Monitor an exact `buildId` to terminal | **GO**, by client-side match; no server-side filter |
+| Monitor an exact `buildId` to terminal | **GO**, public exact-id read with bounded polling |
 | Fetch sanitized logs | **GO**, terminal only, through the untrusted and byte-cap path |
 | Cancel an in-progress Build | **NO-GO**, emit `CANCEL_BUILD` |
 | Activate, deactivate, restore, roll back | **NO-GO**, not supported by this adapter |
-| Read the active Build | **NO-GO**, absent from the delegated schema |
-| Host API-key Build routes | **NO-GO**, do not probe |
+| Read the active Build | **GO**, `cursor_get_active_build`; unavailable in delegated inspection |
+| API-key Build list and exact get | **GO**, public read tools |
+| Build mutation routes | Do not invent routes; use the existing draft trigger or owner guidance |
 
 Implementations must not claim active-Build invariance, must not wrap run
 cancellation as Build cancellation, must not treat `SUCCEEDED` as activated,
