@@ -17,7 +17,7 @@
 - A service-created session survived a 110 s full client disconnect. Each AttachSession mints
   a new PTY and its stream replays a screen repaint (alternate-screen sequences), not clean
   bytes. An attachment's lifetime is not the workload's lifetime.
-- Sessions are pod-global: ours was listed alongside everything else on the pod.
+- Session listing is pod-scoped rather than scoped to this MCP client.
 - Cursor IDE 3.20.10 runs cloud terminals as `/exec-daemon/tmux -u -f <conf> new-session -A -s
   <name>` with USER_MANUAL sessions, only behind the `cloud_glass_shared_sessions` gate (default
   off). `-A` attaches-or-creates, so an opened terminal is weak evidence of recovery.

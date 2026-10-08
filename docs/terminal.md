@@ -1,6 +1,6 @@
 # Cloud Agent VM terminal
 
-The optional terminal tools connect from Cursor MCP directly to an existing Cursor-hosted VM. Cursor IDE, an extension, browser automation, and agent inference are not runtime dependencies. The terminal feature requires Node 22 or newer with its built-in WebSocket API; other tools keep the package's normal Node requirement.
+Terminal functionality uses Cursor service RPCs and a VM gateway. The optional tools connect to an existing Cursor-hosted VM. Cursor IDE, an extension, browser automation, and agent inference are not runtime dependencies. The terminal feature requires Node 22 or newer with its built-in WebSocket API; other tools keep the package's normal Node requirement.
 
 Configure the existing `CURSOR_API_KEY` and an explicit policy:
 
