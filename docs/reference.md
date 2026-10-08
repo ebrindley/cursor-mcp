@@ -3,10 +3,45 @@
 [Installation and first task](../README.md).
 
 The display name describes the integration's domain. It does not mean every tool
-launches a VM or has only remote effects. Use the [execution-selection rule](../README.md#local-cursor-or-cloud-agents)
+launches a VM or has only remote effects. Use the [execution-selection rule](#local-cursor-or-cloud-agents)
 to distinguish general local Cursor work from Cloud Agent management. Technical
 identities (`cursor-mcp`, the `cursor` registration key and `cursor_*` tool names)
 remain stable; display titles and descriptions are presentation metadata.
+
+## Local Cursor or Cloud Agents?
+
+Choosing Composer, a repository, a PR, or a branch does not by itself choose where
+the work runs. Honor the user's selected execution surface and established context.
+
+| Request or context | Execution surface |
+|---|---|
+| Explicit local Cursor CLI or local-only working state | The intended local environment |
+| Explicit Cloud Agent/VM request, selection of this integration, or an identified cloud agent | The corresponding MCP operation |
+| Follow-up to an existing cloud agent | That agent's existing workspace |
+| Model, repository, PR or branch name without execution context | Use established context, or clarify once |
+| Local CLI or requested local model unavailable | Report the limitation; do not silently launch a Cloud Agent |
+
+For local Cursor work outside Cursor, use the installed Cursor CLI (`agent` in
+[Cursor's current documentation](https://cursor.com/docs/cli/installation);
+some installations expose `cursor-agent`). When already working inside Cursor,
+use its existing local execution mechanism rather than launching a redundant copy.
+Honor explicit requests for a separate agent or model.
+
+A new repository-backed Cloud Agent does not automatically receive local-only
+files or unpushed changes. Once cloud execution is selected, resolve the appropriate
+Git remote and available revision. A Cloud Agent model catalog does not establish
+local CLI availability or defaults.
+
+Some MCP tools inspect local environment files or make local judgments. Others use
+a configured local CLI to read or change Cursor account state, or launch remote
+diagnostics. See the [tool authority table](#tools); a local process need not have
+only local effects.
+
+The display title, server instructions and tool descriptions clarify these
+boundaries. The registration key `cursor` and `cursor_*` tool names stay unchanged,
+so some clients still show the shorter name. This is guidance, not an execution
+router or a guarantee of correct assistant selection. Existing host approvals
+and server policy remain the execution controls; this change adds no gate.
 
 ## Design
 

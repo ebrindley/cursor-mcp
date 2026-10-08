@@ -5,8 +5,7 @@ Cloud Agents, use their VM terminals, and manage associated environments.
 It is not a general local coding or research runner. Choose which repositories
 cloud agents can access, launch a task, follow up, and inspect the reported branch or PR.
 
-No policy means read-only; enabling launches is an explicit step. This is an
-independent project, not an official Cursor product.
+This is an independent project, not an official Cursor product.
 
 ```text
 You: Use a Cursor Cloud Agent to fix the empty-search bug in ExampleOrg/ExampleRepo.
@@ -27,38 +26,10 @@ launch, without network requests or a key. See the [offline walkthrough][first-t
 
 ## Local Cursor or Cloud Agents?
 
-Choosing Composer, a repository, a PR, or a branch does not by itself choose where
-the work runs. Honor the user's selected execution surface and established context.
-
-| Request or context | Execution surface |
-|---|---|
-| Explicit local Cursor CLI or local-only working state | The intended local environment |
-| Explicit Cloud Agent/VM request, selection of this integration, or an identified cloud agent | The corresponding MCP operation |
-| Follow-up to an existing cloud agent | That agent's existing workspace |
-| Model, repository, PR or branch name without execution context | Use established context, or clarify once |
-| Local CLI or requested local model unavailable | Report the limitation; do not silently launch a Cloud Agent |
-
-For local Cursor work outside Cursor, use the installed Cursor CLI (`agent` in
-[Cursor's current documentation](https://cursor.com/docs/cli/installation);
-some installations expose `cursor-agent`). When already working inside Cursor,
-use its existing local execution mechanism rather than launching a redundant copy.
-Honor explicit requests for a separate agent or model.
-
-A new repository-backed Cloud Agent does not automatically receive local-only
-files or unpushed changes. Once cloud execution is selected, resolve the appropriate
-Git remote and available revision. A Cloud Agent model catalog does not establish
-local CLI availability or defaults.
-
-Some MCP tools inspect local environment files or make local judgments. Others use
-a configured local CLI to read or change Cursor account state, or launch remote
-diagnostics. See the [tool authority table][tools]; a local process need not have
-only local effects.
-
-The display title, server instructions and tool descriptions clarify these
-boundaries. The registration key `cursor` and `cursor_*` tool names stay unchanged,
-so some clients still show the shorter name. This is guidance, not an execution
-router or a guarantee of correct assistant selection. Existing host approvals
-and server policy remain the execution controls; this change adds no gate.
+This integration manages Cursor Cloud Agents, not local Cursor sessions. A new
+repository-backed Cloud Agent does not automatically receive local-only files
+or unpushed changes. See [execution context](docs/reference.md#local-cursor-or-cloud-agents)
+for local/cloud selection and tool authority.
 
 ## Quickstart
 
@@ -70,6 +41,11 @@ You need:
 - Claude Code, Codex, Grok, or Cursor as your MCP client.
 
 Installation uses GitHub source and automates dependency installation and building.
+Without a policy file, the server is read-only. On a fresh installation, the
+installer creates an account-wide policy for agent management and terminal access
+across repositories and environments your Cursor account can access. Deletion
+tools are excluded, and existing policies are preserved. For narrower access,
+see [restricted profiles][policy-setup] before launching work.
 
 ### 1. Install the server
 
@@ -92,29 +68,15 @@ does not load `.env` files itself. Desktop clients may need their own
 
 ### 3. Check setup
 
-The installer enables agent management and terminal access across repositories and
-environments your Cursor account can access. No repository registration or model
-selection is required. Deletion tools are excluded from fresh setup.
+Run the installation check:
 
 ```bash
 node ~/.local/share/cursor-mcp/current/dist/bin.js doctor
 ```
 
-To migrate an existing restricted policy to account-wide access:
-
-```bash
-node ~/.local/share/cursor-mcp/current/dist/bin.js setup --account --yes
-```
-
-Existing model selections and unrelated settings are preserved. To choose a model,
-use `--model ID` and optional `--fast false|true`; explicit selections are verified
-against Cursor's model catalog. No model is pinned by default.
-
-Once cloud execution is selected, the calling assistant should resolve the current
-project's Git remote when that cloud task needs a repository. Local-only files and
-unpushed changes are not automatically included. Account-wide permission does not
-choose a repository or execution surface for a task.
-For optional restricted profiles and diagnostics, see [setup][policy-setup].
+Read the reported permissions and confirm that they match your intended use.
+No model is pinned by default. For restricted profiles, policy migration and
+model selection, see [capability setup](docs/setup.md#capability-setup).
 
 ### 4. Connect your client
 
@@ -150,9 +112,10 @@ see [troubleshooting][troubleshooting] if this check fails.
 > before launching. Keep the returned agent and run IDs. Check the result and
 > report any returned PR link and remaining work. Do not merge it.
 
-Replace `OWNER/REPO` with the repository enabled above. A successful launch
+Real launches may incur Cursor charges. Replace `OWNER/REPO` with the intended
+repository available to your account and permitted by your policy. A successful launch
 returns agent and run IDs; continue checking the run until it finishes. The
-policy requests automatic PR creation, but a run may finish without a PR.
+task asks for a PR, but a run may finish without one.
 Inspect any reported branch or PR before deciding what to do next.
 
 For a follow-up: **"Ask that same Cursor Cloud Agent to add the missing regression test."**
@@ -173,7 +136,6 @@ See the [first-task guide][first-task] for examples and resuming after a restart
 ## Documentation
 
 - [Cloud Agent VM terminal](docs/terminal.md): command execution, interactive sessions, and detached long-running jobs without a Cursor IDE dependency.
-
 - [Client configuration, custom policies, diagnostics, and updates][setup]
 - [First task, follow-ups, recovery, and examples][first-task]
 - [Run activity and streaming][activity]
@@ -197,20 +159,20 @@ Keep vulnerability details and credentials out of public issues.
 [MIT](LICENSE). You may fork, modify, and redistribute the project, including for
 commercial use.
 
-[first-task]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/first-task.md
-[setup]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/setup.md
-[claude-setup]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/setup.md#claude-code
-[codex-setup]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/setup.md#codex
-[grok-setup]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/setup.md#grok
-[cursor-setup]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/setup.md#cursor
-[policy-setup]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/setup.md#custom-policy-and-permissions
-[troubleshooting]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/first-task.md#troubleshooting
-[activity]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/streaming.md
-[reference]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/reference.md
-[design]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/reference.md#design
-[guardrails]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/reference.md#guardrails
-[configuration]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/reference.md#configuration
-[tools]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/reference.md#tools
-[development]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/reference.md#development
-[version]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/reference.md#version
-[packaging]: https://github.com/ebrindley/cursor-mcp/blob/main/docs/reference.md#preparing-a-package
+[first-task]: docs/first-task.md
+[setup]: docs/setup.md
+[claude-setup]: docs/setup.md#claude-code
+[codex-setup]: docs/setup.md#codex
+[grok-setup]: docs/setup.md#grok
+[cursor-setup]: docs/setup.md#cursor
+[policy-setup]: docs/setup.md#custom-policy-and-permissions
+[troubleshooting]: docs/first-task.md#troubleshooting
+[activity]: docs/streaming.md
+[reference]: docs/reference.md
+[design]: docs/reference.md#design
+[guardrails]: docs/reference.md#guardrails
+[configuration]: docs/reference.md#configuration
+[tools]: docs/reference.md#tools
+[development]: docs/reference.md#development
+[version]: docs/reference.md#version
+[packaging]: docs/reference.md#preparing-a-package

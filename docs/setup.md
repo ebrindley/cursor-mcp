@@ -1,7 +1,8 @@
 # Client setup and maintenance
 
 Start with the [quickstart](../README.md#quickstart) to install the server, provide
-an API key, and enable a repository. Choose your client below, then return to
+an API key, and check the installed permissions. Choose your client below, then
+return to
 [verify the connection](../README.md#5-verify-the-connection).
 
 The installer maintains a stable `current/dist/bin.js` under
@@ -110,8 +111,8 @@ without printing key values or account details. Look for `OK` on runtime, policy
 credential, account, and repository checks. `INFO` rows describe launch
 permissions. A successful check does not guarantee that a launch will succeed.
 
-`doctor --offline` checks local configuration only and still requires
-`CURSOR_API_KEY` to be present. Doctor does not launch work or prove that your MCP
+`doctor --offline` checks local configuration only; missing credentials are
+informational in this mode. Doctor does not launch work or prove that your MCP
 client is registered correctly. Verify that separately through the
 [quickstart connection check](../README.md#5-verify-the-connection).
 
@@ -129,9 +130,10 @@ Use `install --host claude` (or `codex` / `grok`, repeatable) to select clients 
 add one later. Cursor is opt-in with `install --with-cursor`; a new Cursor entry
 stores the supplied `CURSOR_API_KEY` in its private configuration. Existing
 registrations retain their launcher, credentials and settings; legacy `npx`
-package registrations migrate to Node. No policy permissions are granted by
-installation. If no client is detected, the installer reports that and can be
-rerun after a client is available.
+package registrations migrate to Node. Fresh installation creates the
+account-wide policy described under [Capability setup](#capability-setup);
+existing policies are preserved. If no client is detected, the installer reports
+that and can be rerun after a client is available.
 
 ```bash
 bash ~/.local/share/cursor-mcp/current/scripts/install.sh status --porcelain
@@ -191,7 +193,7 @@ of a reachable VM. Optional CLI configuration is not required for terminal acces
 Once cloud execution is selected, the calling assistant supplies the current
 project's Git remote for repository operations. Local-only files and unpushed
 changes are not automatically included. It asks about the repository only when
-that cloud target is ambiguous. See the [local/cloud selection rule](../README.md#local-cursor-or-cloud-agents)
+that cloud target is ambiguous. See the [local/cloud selection rule](reference.md#local-cursor-or-cloud-agents)
 before choosing an execution surface.
 
 Account setup enables saved-environment discovery through the public API.
