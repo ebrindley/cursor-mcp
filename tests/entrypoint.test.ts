@@ -115,7 +115,7 @@ describe("entry-point detection", () => {
       expect(tool("cursor_list_models").description).toContain("not the local Cursor CLI catalog");
       expect(tool("cursor_terminal_execute").description).toContain("not the caller's local checkout");
       expect(tool("cursor_validate_environment_definition").description).toContain("Locally check");
-      expect(tool("cursor_get_build").description).toContain("Cloud Agent diagnostic");
+      expect(tool("cursor_get_build").description).toContain("public API");
       expect(tool("cursor_publish_environment").description).toContain("local Cursor CLI to create a pull request");
       expect(tool("cursor_export_run").description).toContain("configured local export root");
     } finally {

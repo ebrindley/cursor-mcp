@@ -210,8 +210,9 @@ which this server does not do.
 | `cursor_list_environment_history` | `GET /v1/environments/{id}/history` | |
 | `cursor_publish_environment` | configured Cursor CLI | yes, creates one pull request after preview and confirmation |
 | `cursor_inspect_environment` | delegated run in the named environment | yes, it launches one |
-| `cursor_list_builds` | delegated run in the named environment | yes, it launches one |
-| `cursor_get_build` | delegated run in the named environment | yes, it launches one |
+| `cursor_list_builds` | `GET /v1/environments/{id}/builds` | no |
+| `cursor_get_build` | `GET /v1/environments/{id}/builds/{buildId}` | no |
+| `cursor_get_active_build` | `GET /v1/environments/{id}/builds/active` | no |
 | `cursor_get_build_logs` | delegated run in the named environment | yes, it launches one; the log body is off unless `includeText: true` |
 | `cursor_trigger_build` | delegated run in the named environment | yes, one draft Build, needs `confirm: true` |
 | `cursor_list_owner_actions` | local catalog | no; the exact owner action for Build cancel, activate, deactivate, rollback, Restore, and host-wide trigger |
@@ -308,9 +309,9 @@ absent from the recorded Build and numeric-version baselines, and a version comp
 counts only from a freshly booted run. The saved document itself stays owner-restricted, so
 persistence is never reported as a content match.
 
-**A successful Build is not the active Build.** No supported authority exposes an
-authoritative active-Build read, so `activeBuild` is always `{ readable: false }` with the
-reason attached — never omitted, because absence would read as "none active".
+**A successful Build is not the active Build.** `cursor_get_active_build` reads the
+current boot selection through the public API. Delegated inspection still reports
+`activeBuild` as `{ readable: false }` with its authority-specific reason.
 `environment-info.build.buildId` is the Build the delegate's own pod booted from, and
 `userFacingSnapshotId` is set on failed Builds too, so neither proves anything about
 activation. `cursor_trigger_build` produces a *draft* Build, which by Cursor's own contract
@@ -745,3 +746,23 @@ same REST follow-up POST even though OpenAPI omits it. Its run/result model is
 client-supplied, not execution attestation. This server adds no SDK dependency,
 new tool, or new gate: it extends the existing model pin from creation to
 follow-ups. Existing pins therefore now apply to both operations.
+
+### Public Build reads
+
+`cursor_list_builds`, `cursor_get_build`, and `cursor_get_active_build` use the API key,
+are available under `read:*`, and launch no agent runs. Supply `environmentPublicId`
+or an allowed environment name. A pinned name avoids catalog resolution; ambiguous
+or unresolved names require an explicit ID. Identity, ownership, and repository
+grants are checked before Build reads.
+
+List reads return one API page (up to ten Builds), optionally filtered by `statuses`.
+Follow `nextCursor` even when a filtered page is empty. Exact reads use `buildId`;
+optional `monitorAttempts` and `monitorIntervalSeconds` bound polling to 45 seconds
+after environment resolution. `previousStatus` detects terminal-status regression.
+These public reads replace delegated list/get missions; delegation resume handles,
+page-count requests, and delegated wait parameters do not apply.
+
+Active readback identifies either `type: build` with a `buildId`, or
+`type: universal_image`. It describes new-agent boot selection, not existing
+processes. A successful Build is not proof of activation. Delegated inspection
+continues to report only the active-state evidence available to its own authority.

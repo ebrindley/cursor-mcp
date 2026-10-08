@@ -58,8 +58,10 @@ child.stdin.write(
 const EXPECTED_READ_ONLY_TOOLS = [
   "cursor_assess_environment_health",
   "cursor_diff_environment_definition",
+  "cursor_get_active_build",
   "cursor_get_agent",
   "cursor_get_artifact_url",
+  "cursor_get_build",
   "cursor_get_bulk_job",
   "cursor_get_environment_configuration",
   "cursor_get_run",
@@ -70,6 +72,7 @@ const EXPECTED_READ_ONLY_TOOLS = [
   "cursor_inspect_workspace",
   "cursor_list_agents",
   "cursor_list_artifacts",
+  "cursor_list_builds",
   "cursor_list_environments",
   "cursor_list_environment_history",
   "cursor_list_models",

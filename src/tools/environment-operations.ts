@@ -91,6 +91,7 @@ import {
 } from "./annotations.js";
 import type { GateableConfig, ToolSpec } from "./register.js";
 import { defineTool } from "./register.js";
+import { registerBuildReadTools } from "./builds.js";
 import { ok } from "./result.js";
 
 /** The catalog that replaced the residual-only verbs. */
@@ -569,7 +570,7 @@ export function registerEnvironmentOperationTools(
     : cursorCliRunner(policy.cursorCli),
 ): string[] {
   const profile = activeProfile(policy);
-  const registered: string[] = [];
+  const registered: string[] = registerBuildReadTools(server, client, policy);
 
   const define = <C extends GateableConfig, A extends unknown[]>(
     spec: ToolSpec<C, A>,
@@ -760,172 +761,6 @@ export function registerEnvironmentOperationTools(
           activeBuild: { readable: false, reason: ACTIVE_BUILD_UNREADABLE_REASON },
           ...(environment === undefined ? {} : { snapshot: { ...environment.snapshot } }),
           builds: builds.map((build) => ({ ...build })),
-          page: pageSummary(pages),
-          evidence: EVIDENCE,
-        },
-        policy,
-      });
-    },
-  });
-
-  define({
-    name: "cursor_list_builds",
-    config: {
-      title: "Cursor Cloud: list Builds",
-      description:
-        "Launch or rejoin a Cloud Agent diagnostic to list an environment's Builds, newest first. No buildId filter exists; page forward before concluding a row moved.",
-      inputSchema: {
-        environment: EnvironmentArg,
-        environmentPublicId: DeclaredIdArg.optional(),
-        ...PageArgs,
-        resume: ResumeArg,
-        waitMs: WaitArg,
-      },
-      outputSchema: {
-        ...RESULT_OUT,
-        builds: z.array(Block).optional(),
-        page: Block.optional(),
-      },
-      annotations: DELEGATED_READ,
-    },
-    handler: async (call: {
-      environment: string;
-      environmentPublicId?: string;
-      statuses?: string[];
-      limit?: number;
-      cursor?: string;
-      pages?: number;
-      resume?: { agentId: string; runId: string };
-      waitMs?: number;
-    }) => {
-      const collected = await collectMission({
-        runner,
-        environment: call.environment,
-        request: request("list-builds", call),
-        resume: call.resume,
-        waitMs: call.waitMs,
-      });
-      if (collected.kind !== "report") return delegationResult(collected, policy);
-
-      const report = collected.report;
-      const identity = reportIdentity(report, call.environmentPublicId);
-      const { gate, reported } = identity;
-      if (gate === "failed" || gate === "unreadable") {
-        return identityFailure(
-          {
-            delegation: collected.delegation,
-            declared: call.environmentPublicId,
-            reported,
-            conflicting: identity.conflicting,
-          },
-          policy,
-        );
-      }
-      const environmentId = call.environmentPublicId ?? reported ?? "";
-      const pages = pagesOf(report);
-      const builds = pages.flatMap((page) =>
-        page.builds.map((row) => projectBuild(row, environmentId)),
-      );
-
-      return ok({
-        source: `delegated run ${collected.delegation.runId}`,
-        text: builds.map(buildLine).join("\n") || "(no Builds on the pages read)",
-        structured: {
-          status: "BUILDS_LISTED",
-          delegation: { ...collected.delegation },
-          builds: builds.map((build) => ({ ...build })),
-          page: pageSummary(pages),
-          evidence: EVIDENCE,
-        },
-        policy,
-      });
-    },
-  });
-
-  define({
-    name: "cursor_get_build",
-    config: {
-      title: "Cursor Cloud: get Build",
-      description:
-        "Launch or rejoin a Cloud Agent diagnostic to read one exact Build, optionally waiting for it to reach a terminal status. SUCCEEDED is not activated.",
-      inputSchema: {
-        environment: EnvironmentArg,
-        buildId: BuildIdArg,
-        environmentPublicId: DeclaredIdArg.optional(),
-        ...PageArgs,
-        ...MonitorArgs,
-        resume: ResumeArg,
-        waitMs: WaitArg,
-      },
-      outputSchema: {
-        ...RESULT_OUT,
-        build: Block.optional(),
-        monitor: Block.optional(),
-        page: Block.optional(),
-      },
-      annotations: DELEGATED_READ,
-    },
-    handler: async (call: {
-      environment: string;
-      buildId: string;
-      environmentPublicId?: string;
-      statuses?: string[];
-      limit?: number;
-      cursor?: string;
-      pages?: number;
-      monitorAttempts?: number;
-      monitorIntervalSeconds?: number;
-      previousStatus?: string;
-      resume?: { agentId: string; runId: string };
-      waitMs?: number;
-    }) => {
-      const collected = await collectMission({
-        runner,
-        environment: call.environment,
-        request: request("get-build", call),
-        resume: call.resume,
-        waitMs: call.waitMs,
-      });
-      if (collected.kind !== "report") return delegationResult(collected, policy);
-
-      const report = collected.report;
-      const identity = reportIdentity(report, call.environmentPublicId);
-      const { gate, reported } = identity;
-      if (gate === "failed" || gate === "unreadable") {
-        return identityFailure(
-          {
-            delegation: collected.delegation,
-            declared: call.environmentPublicId,
-            reported,
-            conflicting: identity.conflicting,
-          },
-          policy,
-        );
-      }
-      const environmentId = call.environmentPublicId ?? reported ?? "";
-      const pages = pagesOf(report);
-      const monitor = monitorOutcome({
-        buildId: call.buildId,
-        environmentPublicId: environmentId,
-        match: findBuild(pages, call.buildId, environmentId),
-        previousStatus: call.previousStatus,
-        attempts: report.monitorAttempts,
-        elapsedMs: report.monitorElapsedMs,
-        deadlineExceeded: report.monitorDeadlineExceeded,
-      });
-
-      return ok({
-        source: `delegated run ${collected.delegation.runId}`,
-        text: [
-          `${monitor.status}  ${call.buildId}  outcome=${monitor.outcome}`,
-          monitor.reason,
-          ...(monitor.build === undefined ? [] : [buildLine(monitor.build)]),
-        ].join("\n"),
-        structured: {
-          status: monitor.status,
-          delegation: { ...collected.delegation },
-          monitor: verdict(monitor),
-          ...(monitor.build === undefined ? {} : { build: { ...monitor.build } }),
           page: pageSummary(pages),
           evidence: EVIDENCE,
         },

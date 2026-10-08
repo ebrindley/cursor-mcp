@@ -153,6 +153,7 @@ describe("registration", () => {
       .map((tool) => tool.name)
       .sort();
     expect(names).toEqual([
+      "cursor_get_active_build",
       "cursor_get_build",
       "cursor_get_build_logs",
       "cursor_inspect_environment",
@@ -204,7 +205,7 @@ describe("registration", () => {
     expect(on).toEqual(["cursor_delete_environment"]);
   });
 
-  it("registers only the local catalog under the read-only wildcard, because everything else launches a VM", () => {
+  it("registers direct Build reads and the local catalog under the read-only wildcard", () => {
     const cursor = new CursorClient({ apiKey: "sk-test", baseUrl: "https://api.example.test" });
     const registered = registerEnvironmentOperationTools(
       new McpServer({ name: "cursor-mcp", version: "test" }),
@@ -213,7 +214,7 @@ describe("registration", () => {
       new AgentScope(cursor, undefined),
       fake((handle) => ({ state: "pending", handle, runStatus: "RUNNING" })).runner,
     );
-    expect(registered).toEqual(["cursor_list_owner_actions"]);
+    expect(registered).toEqual(["cursor_list_builds", "cursor_get_build", "cursor_get_active_build", "cursor_list_owner_actions"]);
   });
 });
 
@@ -343,8 +344,9 @@ describe("delegation lifecycle", () => {
       environment: ENV_NAME,
     });
     const resume = pending.structured.resume as { agentId: string; runId: string };
-    const result = await invoke(WRITE, runner, "cursor_list_builds", {
+    const result = await invoke(WRITE, runner, "cursor_get_build_logs", {
       environment: ENV_NAME,
+      buildId: "bld-1",
       resume,
     });
     expect(result.isError).toBe(true);
@@ -360,7 +362,7 @@ describe("delegation lifecycle", () => {
       runStatus: "FINISHED",
       text: "I could not do it, sorry.",
     }));
-    const result = await invoke(WRITE, runner, "cursor_list_builds", {
+    const result = await invoke(WRITE, runner, "cursor_inspect_environment", {
       environment: ENV_NAME,
     });
     expect(result.structured.status).toBe("DELEGATION_FAILED");
@@ -448,42 +450,6 @@ describe("cursor_inspect_environment", () => {
       environment: ENV_NAME,
     });
     expect(result.structured.identityGate).toBe("ungated");
-  });
-});
-
-describe("cursor_get_build", () => {
-  it("matches the exact Build and reports a terminal status", async () => {
-    const { runner, starts } = reporting({
-      mission: "get-build",
-      builds: { builds: [buildRow({ buildId: "bld-2" }), buildRow()], hasMore: false },
-      monitorAttempts: 3,
-    });
-    const result = await invoke(WRITE, runner, "cursor_get_build", {
-      environment: ENV_NAME,
-      environmentPublicId: ENV_ID,
-      buildId: "bld-1",
-      monitorAttempts: 3,
-    });
-    expect(result.structured.status).toBe("TERMINAL");
-    expect(result.structured.build).toMatchObject({
-      buildId: "bld-1",
-      outcome: "succeeded",
-      snapshot: "ready",
-    });
-    expect(starts[0]?.request.buildId).toBe("bld-1");
-  });
-
-  it("reports a stale readback when a Build the caller saw terminal reads otherwise", async () => {
-    const { runner } = reporting({
-      mission: "get-build",
-      builds: { builds: [buildRow({ status: "IN_PROGRESS" })], hasMore: false },
-    });
-    const result = await invoke(WRITE, runner, "cursor_get_build", {
-      environment: ENV_NAME,
-      buildId: "bld-1",
-      previousStatus: "SUCCEEDED",
-    });
-    expect(result.structured.status).toBe("READBACK_STALE");
   });
 });
 
