@@ -59,13 +59,13 @@ export class TerminalSessions {
   private detach(op: Session) {
     const peer = op.peer; delete op.peer; op.abort?.abort(); delete op.abort; peer?.close();
   }
-  private async attach(op: Session): Promise<TerminalPeer> {
+  private async attach(op: Session, initialPeer?: TerminalPeer): Promise<TerminalPeer> {
     if (this.closed) throw new TerminalFailure('terminal_closed');
     if (op.peer) return op.peer;
     if (op.connecting) return op.connecting;
     if (!op.ptyId || ['exited', 'lost', 'closing', 'unknown'].includes(op.state)) throw new TerminalFailure('session_not_attachable');
     op.connecting = (async () => {
-      const { peer } = await this.connector.connect(op.machineId);
+      const peer = initialPeer ?? (await this.connector.connect(op.machineId)).peer;
       if (this.closed || op.state === 'closing') { peer.close(); throw new TerminalFailure('terminal_closed'); }
       op.peer = peer; op.abort = new AbortController(); op.state = 'attaching';
       const disconnected = (reason: string) => {
@@ -197,8 +197,8 @@ export class TerminalSessions {
           cwd: '/tmp', env: { BASH_ENV: '/dev/null', TERM: 'dumb', PS1: 'MCP> ', PROMPT_COMMAND: '' }, cols, rows }, () => { op.creationOutcome = 'unknown'; });
         if (typeof response.ptyId !== 'string' || !response.ptyId) throw new TerminalFailure('spawn_identity_missing', true);
         op.ptyId = response.ptyId; op.creationOutcome = 'submitted'; op.state = 'detached';
-      } finally { connection.peer.close(); }
-      await this.attach(op);
+        await this.attach(op, connection.peer);
+      } finally { if (op.peer !== connection.peer) connection.peer.close(); }
     } catch (error) {
       op.reason = code(error);
       Object.assign(op, failureFields(error));

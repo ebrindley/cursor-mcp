@@ -9,6 +9,7 @@ function fixture(bytes = 65536, capacity = 4) {
   let counter = 0, failInput = false, failCleanup = false, changed = false, failSpawn = false;
   let timeoutMethod: string | undefined;
   const connector: TerminalConnector = { async connect(expected) {
+    calls.push({ method: 'Connect', input: { expected } });
     if (changed && expected) throw new TerminalFailure('machine_changed');
     const peer: TerminalPeer = { async unary(method, input, submitted) {
       calls.push({ method, input }); submitted?.();
@@ -24,7 +25,7 @@ function fixture(bytes = 65536, capacity = 4) {
         listeners.set(input.ptyId as string, { event: e => { try { event(e); } catch (error) { reject(error as Error); } }, reject });
         signal.addEventListener('abort', () => reject(new TerminalFailure('request_cancelled')), { once: true });
       });
-    }, close() {} };
+    }, close() { calls.push({ method: 'Close', input: {} }); } };
     return { machineId: 'machine', peer };
   } };
   const service = new TerminalSessions(connector, bytes, capacity);
@@ -38,6 +39,21 @@ function fixture(bytes = 65536, capacity = 4) {
     async create(sequence = 1) { return service.handle(request('create', { sequence })); },
   };
 }
+
+test('creation keeps its connection for attachment and input, then reconnects after stream loss', async () => {
+  const f = fixture();
+  try {
+    const created = await f.create();
+    expect(f.calls.map(c => c.method)).toEqual(['Connect', 'SpawnPty', 'AttachPty']);
+    await f.service.handle(f.request('input', { terminalId: created.terminalId, sequence: 1, data: 'pwd\n' }));
+    expect(f.calls.filter(c => c.method === 'Connect')).toHaveLength(1);
+    f.drop();
+    await vi.waitFor(async () => expect((await f.service.handle(f.request('list'))).terminals).toMatchObject([{ state: 'detached' }]));
+    expect(f.calls.filter(c => c.method === 'Close')).toHaveLength(1);
+    await f.service.handle(f.request('attach', { terminalId: created.terminalId }));
+    expect(f.calls.filter(c => c.method === 'Connect').map(c => c.input.expected)).toEqual([undefined, 'machine']);
+  } finally { f.service.close(); }
+});
 
 test('owned sessions support persistent input/resize, bounded concurrency and safe sequence retirement', async () => {
   const f = fixture(65536, 2), a = await f.create(), b = await f.create(2);
