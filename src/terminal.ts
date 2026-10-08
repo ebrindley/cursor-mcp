@@ -246,7 +246,7 @@ export class TerminalService {
       if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) throw new Error('invalid_output');
       const bytes = Buffer.from(data, 'base64');
       const left = this.maxOutputBytes - op.bytes.length;
-      op.bytes = Buffer.concat([op.bytes, bytes.subarray(0, left)]);
+      if (left > 0 && bytes.length > 0) op.bytes = Buffer.concat([op.bytes, bytes.subarray(0, left)]);
       if (bytes.length > left) op.outputTruncated = true;
     } else if (event.ptyExited !== undefined) {
       if (!object(event.ptyExited)) throw new Error('invalid_pty_event');
