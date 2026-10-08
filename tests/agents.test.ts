@@ -2190,6 +2190,61 @@ describe("thin list summaries", () => {
   const mine = [{url: "https://github.com/ExampleOrg/ExampleRepo"}];
   const urls = () => fetchImpl.mock.calls.map((call) => String(call[0]));
 
+  it("bounds concurrent detail reads and preserves page order", async () => {
+    const items = Array.from({ length: 6 }, (_, i) => thin(`bc-${i}`));
+    fetchImpl.mockResolvedValue(json({ items }));
+    const releases: Array<() => void> = [];
+    let active = 0, peak = 0;
+    const resolve = vi.spyOn(AgentScope.prototype, "resolve").mockImplementation(async id => {
+      active++; peak = Math.max(peak, active);
+      await new Promise<void>(done => releases.push(done)); active--;
+      return { verdict: "allowed", agent: { ...thin(id), repos: mine } };
+    });
+    const client = await connect(fetchImpl, policy(["read:*"]), true);
+    try {
+      const pending = client.callTool({ name: "cursor_list_agents", arguments: {} });
+      await vi.waitFor(() => expect(releases).toHaveLength(4));
+      releases.splice(0).reverse().forEach(done => done());
+      await vi.waitFor(() => expect(releases).toHaveLength(2));
+      releases.splice(0).reverse().forEach(done => done());
+      const result = await pending;
+      expect(peak).toBe(4);
+      expect((result.structuredContent as { agents: Array<{ id: string }> }).agents.map(a => a.id)).toEqual(items.map(a => a.id));
+    } finally { resolve.mockRestore(); await client.close(); }
+  });
+
+  it("returns unresolved counts at the whole-call deadline without starting queued reads", async () => {
+    fetchImpl.mockResolvedValue(json({ items: Array.from({ length: 8 }, (_, i) => thin(`bc-${i}`)), nextCursor: "more" }));
+    const resolve = vi.spyOn(AgentScope.prototype, "resolve").mockImplementation(async (_id, options) =>
+      new Promise<never>((_done, reject) => options?.signal?.addEventListener("abort", () => reject(new Error("deadline")), { once: true })));
+    const client = await connect(fetchImpl, policy(["read:*"]), true);
+    vi.useFakeTimers();
+    try {
+      const pending = client.callTool({ name: "cursor_list_agents", arguments: {} });
+      await vi.waitFor(() => expect(resolve).toHaveBeenCalledTimes(4));
+      await vi.advanceTimersByTimeAsync(45_000);
+      const result = await pending;
+      expect(result.structuredContent).toEqual({ agents: [], unresolved: 8, nextCursor: "more" });
+      expect(resolve).toHaveBeenCalledTimes(4);
+    } finally { vi.useRealTimers(); resolve.mockRestore(); await client.close(); }
+  });
+
+  it("reports an initial-list deadline as a transport error rather than caller cancellation", async () => {
+    const get = vi.spyOn(CursorClient.prototype, "get").mockImplementation(async (_path, _schema, options) =>
+      new Promise<never>((_resolve, reject) => options?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true })));
+    const client = await connect(fetchImpl, policy(["read:*"]), true);
+    vi.useFakeTimers();
+    try {
+      const pending = client.callTool({ name: "cursor_list_agents", arguments: {} });
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(45_000);
+      const result = await pending;
+      expect(result.isError).toBe(true);
+      expect(text(result)).toContain("total deadline");
+      expect(text(result)).not.toContain("cancelled by the caller");
+    } finally { vi.useRealTimers(); get.mockRestore(); await client.close(); }
+  });
+
   it("resolves a thin summary once, and a denial stays a denial", async () => {
     fetchImpl.mockImplementation(async (input) => {
       const url = String(input);
@@ -2379,13 +2434,14 @@ describe("thin list summaries", () => {
   });
 
   it("stops resolving when the caller cancels", async () => {
-    let detailSignal: AbortSignal | undefined;
+    const detailSignals: AbortSignal[] = [];
     fetchImpl.mockImplementation(async (input, init) => {
       const url = String(input);
       if (url.endsWith("/v1/agents")) {
-        return json({items: [thin("bc-1"), thin("bc-2")]});
+        return json({items: Array.from({ length: 6 }, (_, i) => thin(`bc-${i + 1}`))});
       }
-      detailSignal = init?.signal ?? undefined;
+      const detailSignal = init?.signal ?? undefined;
+      if (detailSignal) detailSignals.push(detailSignal);
       return new Promise((_resolve, reject) => {
         detailSignal?.addEventListener("abort", () => {
           reject(Object.assign(new Error("aborted"), {name: "AbortError"}));
@@ -2399,17 +2455,20 @@ describe("thin list summaries", () => {
       undefined,
       {signal: controller.signal},
     );
-    await vi.waitFor(() => expect(detailSignal).toBeDefined());
+    await vi.waitFor(() => expect(detailSignals).toHaveLength(4));
     controller.abort();
     await expect(pending).rejects.toThrow();
 
-    // A cancelled read is not an unresolved item to be counted and moved past:
-    // bc-2 is never asked for.
+    // Cancellation aborts in-flight reads and leaves the remaining queue untouched.
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(urls()).toEqual([
       "https://api.example.test/v1/agents",
       "https://api.example.test/v1/agents/bc-1",
+      "https://api.example.test/v1/agents/bc-2",
+      "https://api.example.test/v1/agents/bc-3",
+      "https://api.example.test/v1/agents/bc-4",
     ]);
+    expect(detailSignals.every(signal => signal.aborted)).toBe(true);
     await client.close();
   });
 });

@@ -153,6 +153,7 @@ const DEFAULT_POLL_INTERVAL_MS = 5_000;
  * page, never a walk of the account.
  */
 const MAX_SCOPE_LOOKUPS = 20;
+const SCOPE_CONCURRENCY = 4;
 
 /**
  * Pairs one `cursor_inspect_runs` call accepts.
@@ -311,97 +312,99 @@ export function registerAgentTools(
         args.prUrl === undefined
           ? undefined
           : assertPullRequestUrlShape(args.prUrl).canonical;
-      const payload = await client.get("/v1/agents", AgentListSchema, {
-        query: {
-          limit: args.limit,
-          cursor: args.cursor,
-          includeArchived: args.includeArchived,
-          prUrl,
-        },
-      });
-      const agents: Agent[] = [];
-      let unresolved = 0;
-      let lookups = 0;
-      for (const agent of payload.items) {
-        const verdict = scope.classify(agent);
-        if (verdict === "allowed") {
-          agents.push(agent);
-          continue;
+      const deadline = new AbortController();
+      const timer = setTimeout(() => deadline.abort(), MAX_BATCH_MS);
+      const caller = currentRequestSignal();
+      const signal = caller ? AbortSignal.any([deadline.signal, caller]) : deadline.signal;
+      try {
+        const payload = await client.get("/v1/agents", AgentListSchema, {
+          query: { limit: args.limit, cursor: args.cursor, includeArchived: args.includeArchived, prUrl },
+          signal,
+        });
+        const decided: Array<Agent | undefined> = new Array(payload.items.length);
+        const pending: number[] = [];
+        let unresolved = 0;
+        // Classify every sighting first, including entries beyond the lookup cap,
+        // so stale cached grants are invalidated even when no detail read follows.
+        for (const [index, agent] of payload.items.entries()) {
+          const verdict = scope.classify(agent);
+          if (verdict === "allowed") decided[index] = agent;
+          else if (verdict === "unresolved") {
+            if (pending.length < MAX_SCOPE_LOOKUPS) pending.push(index);
+            else unresolved += 1;
+          }
         }
-        if (verdict === "denied") continue;
-        // A summary too thin to judge. One read of the full record decides it,
-        // for the items that need it and no others.
-        if (lookups >= MAX_SCOPE_LOOKUPS) {
-          unresolved += 1;
-          continue;
+        let next = 0;
+        const worker = async () => {
+          while (next < pending.length) {
+            const index = pending[next++]!;
+            if (signal.aborted) { unresolved += 1; continue; }
+            try {
+              const resolved = await scope.resolve(payload.items[index]!.id, { signal });
+              if (resolved.verdict === "allowed") decided[index] = resolved.agent;
+              else if (resolved.verdict === "unresolved") unresolved += 1;
+            } catch {
+              unresolved += 1;
+            }
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(SCOPE_CONCURRENCY, pending.length) }, worker));
+        if (caller?.aborted) throw new CursorCancelledError("Agent list cancelled");
+        const agents = decided.filter((agent): agent is Agent => agent !== undefined);
+        const lines = agents.map(agentLine);
+        if (unresolved > 0) {
+          lines.push(
+            `(${unresolved} listed agent${unresolved === 1 ? "" : "s"} could not be checked ` +
+              "against the profile and stayed hidden; retry, or narrow the page with `limit`)",
+          );
         }
-        lookups += 1;
-        try {
-          const resolved = await scope.resolve(agent.id);
-          // The record that was checked is the record that is reported: a
-          // verdict reached on the full record does not license the thinner,
-          // possibly different summary it replaced.
-          if (resolved.verdict === "allowed") agents.push(resolved.agent);
-          // A full record that still carries no repository metadata is
-          // undecided, not refused.
-          else if (resolved.verdict === "unresolved") unresolved += 1;
-        } catch (error) {
-          // Cancellation is the caller's decision, not a scope answer.
-          if (error instanceof CursorCancelledError) throw error;
-          // Neither permitted nor refused: a failed read leaves the scope
-          // unknown, and an unknown scope must not read as an empty account.
-          unresolved += 1;
+        // A filtered page is one page of Cursor's answer, not a census. Saying so
+        // matters most when it is empty: "no agents" would otherwise read as "no
+        // agent ever worked on this pull request", which neither pagination nor a
+        // hidden unresolved item supports.
+        if (prUrl !== undefined) {
+          lines.push(
+            "(" +
+              (agents.length === 0
+                ? "no agents on this page matched that pull request; "
+                : "") +
+              `filtered by prUrl=${prUrl}; this is one page of Cursor's matches, not proof ` +
+              "of what else exists" +
+              (payload.nextCursor === undefined
+                ? ""
+                : "; more pages remain -- pass the same prUrl with `cursor` to continue") +
+              ")",
+          );
         }
-      }
-      const lines = agents.map(agentLine);
-      if (unresolved > 0) {
-        lines.push(
-          `(${unresolved} listed agent${unresolved === 1 ? "" : "s"} could not be checked ` +
-            "against the profile and stayed hidden; retry, or narrow the page with `limit`)",
-        );
-      }
-      // A filtered page is one page of Cursor's answer, not a census. Saying so
-      // matters most when it is empty: "no agents" would otherwise read as "no
-      // agent ever worked on this pull request", which neither pagination nor a
-      // hidden unresolved item supports.
-      if (prUrl !== undefined) {
-        lines.push(
-          "(" +
-            (agents.length === 0
-              ? "no agents on this page matched that pull request; "
-              : "") +
-            `filtered by prUrl=${prUrl}; this is one page of Cursor's matches, not proof ` +
-            "of what else exists" +
-            (payload.nextCursor === undefined
-              ? ""
-              : "; more pages remain -- pass the same prUrl with `cursor` to continue") +
-            ")",
-        );
-      }
-      return ok({
-        source: "GET /v1/agents",
-        text: lines.join("\n") || "(no agents in profile)",
-        structured: {
-          agents: agents.map((a) => {
-            const environment = a.env?.name?.trim();
-            return {
-              id: a.id,
-              status: a.status,
-              followUp: followUpAcceptance(a.status),
-              ...(a.name === undefined ? {} : { name: a.name }),
-              ...(a.latestRunId === undefined
-                ? {}
-                : { latestRunId: a.latestRunId }),
-              ...(environment ? { environment } : {}),
-            };
-          }),
-          ...(unresolved === 0 ? {} : { unresolved }),
-          ...(payload.nextCursor === undefined
-            ? {}
-            : { nextCursor: payload.nextCursor }),
-        },
-        policy,
-      });
+        return ok({
+          source: "GET /v1/agents",
+          text: lines.join("\n") || "(no agents in profile)",
+          structured: {
+            agents: agents.map((a) => {
+              const environment = a.env?.name?.trim();
+              return {
+                id: a.id,
+                status: a.status,
+                followUp: followUpAcceptance(a.status),
+                ...(a.name === undefined ? {} : { name: a.name }),
+                ...(a.latestRunId === undefined
+                  ? {}
+                  : { latestRunId: a.latestRunId }),
+                ...(environment ? { environment } : {}),
+              };
+            }),
+            ...(unresolved === 0 ? {} : { unresolved }),
+            ...(payload.nextCursor === undefined
+              ? {}
+              : { nextCursor: payload.nextCursor }),
+          },
+          policy,
+        });
+      } catch (error) {
+        if (deadline.signal.aborted && !caller?.aborted)
+          throw new CursorTransportError(`Agent list exceeded the ${MAX_BATCH_MS}ms total deadline`);
+        throw error;
+      } finally { clearTimeout(timer); }
     },
   });
 
