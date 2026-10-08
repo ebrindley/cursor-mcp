@@ -67,9 +67,7 @@ export async function main(): Promise<void> {
     // Local and generic: no client, because Environment Definition talks to a
     // repository file and the caller's own text, never to Cursor.
     ...registerEnvironmentDefinitionTools(server, policy),
-    // Global environment discovery and configuration reads. Their authority is an
-    // optional local Cursor CLI; without one they report why, and they never
-    // substitute a delegated run for the answer.
+    // Saved environment discovery, configuration digests, and history use REST.
     ...registerEnvironmentCatalogTools(server, client, policy),
     // Environment Operations reaches Cursor's Build control plane through a
     // bounded delegated run, which is launched with the same client and the same

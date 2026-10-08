@@ -205,8 +205,9 @@ which this server does not do.
 | `cursor_validate_environment_definition` | local `.cursor/environment.json` or supplied text | |
 | `cursor_inspect_environment_definition` | local `.cursor/environment.json` or supplied text | |
 | `cursor_diff_environment_definition` | local `.cursor/environment.json` or supplied text | |
-| `cursor_list_environments` | configured Cursor CLI, or an availability result | |
-| `cursor_get_environment_configuration` | configured Cursor CLI, or an availability result | |
+| `cursor_list_environments` | `GET /v1/environments` | |
+| `cursor_get_environment_configuration` | `GET /v1/environments/{id}` | |
+| `cursor_list_environment_history` | `GET /v1/environments/{id}/history` | |
 | `cursor_publish_environment` | configured Cursor CLI | yes, creates one pull request after preview and confirmation |
 | `cursor_inspect_environment` | delegated run in the named environment | yes, it launches one |
 | `cursor_list_builds` | delegated run in the named environment | yes, it launches one |
@@ -244,28 +245,17 @@ definition can carry an inline credential even though the schema has no secret f
 The schema is checked locally; it is not downloaded at runtime. Tests use original
 behavioral examples, so future upstream additions may require an update here.
 
-**The two catalog reads use a local Cursor CLI, and say so when they cannot.** There is no
-`/v1/environments`, and a delegated run only knows the one environment it is already inside,
-so listing environments and reading one environment's configuration are answered by the
-optional CLI configured under `cursorCli`. Both tools are registered whether or not a CLI
-exists: without one you get `CLI_NOT_CONFIGURED`, and otherwise `CLI_READS_DISABLED`,
-`CLI_MISSING`, `CLI_INCOMPATIBLE`, `CLI_FEATURE_GATED`, `CLI_AUTH_REQUIRED`, or
-`CLI_IDENTITY_MISMATCH`, each with the version and contract fingerprint actually observed.
-Neither ever falls back to a delegated run — that would spend quota and quietly change which
-authority answered, so `cursor_inspect_environment` stays the explicit way to ask a delegate.
-Every unavailable result, and the account-mode observed result, also names the inventory that
-does exist without a CLI: `cursor_list_agents` lists existing cloud-agent records when the
-profile permits it, at no run cost.
-The child process gets no shell, no stdin, a controlled working directory, a rebuilt
-environment that never carries `CURSOR_API_KEY`, a byte ceiling, and a timeout that reaps
-descendants. Because the CLI authenticates as whoever logged it in rather than as this
-server's key, its effective identity is verified against `GET /v1/me` first, and an
-unverifiable one stops the read. Registration is proven from `--help` before any command is
-issued: the CLI's root argument is an agent prompt, so a build that advertises no commands is
-reported `FEATURE_GATED` rather than handed `env list` to run as a prompt. Internal numeric
-ids stay provider-private, and configuration is reported as candidates with a source,
-precedence, a normalized digest, and a `matched` / `different` / `unreadable` classification —
-never as script text.
+Saved environments are read through the public API. `cursor_list_environments` accepts
+`limit`, `cursor`, and an optional ownership `scope`. Follow `nextCursor`, including
+on empty pages. Visibility checks and concurrent updates can make a catalog walk
+incomplete. Discovery is not an access grant; `inProfile` reports configuration-read access.
+
+`cursor_get_environment_configuration` checks the returned identity, ownership, and
+repository scope, then returns classified configuration digests and an optional version ID.
+Missing or invalid configuration remains unreadable. `cursor_list_environment_history`
+uses the same grants and paginates history; embedded configurations become digests.
+These reads use the API key and never launch an agent. Account/API failures are
+reported without substituting another authority.
 
 **The three CLI environment writes are independently gated.** Publication accepts only an
 exactly bound personal, single-repository environment and returns

@@ -194,7 +194,7 @@ changes are not automatically included. It asks about the repository only when
 that cloud target is ambiguous. See the [local/cloud selection rule](../README.md#local-cursor-or-cloud-agents)
 before choosing an execution surface.
 
-Account setup enables environment discovery. Without a configured CLI catalog,
-`cursor_list_environments` reports environment names and repository associations
-observed on a page of agents, with a continuation cursor. These observations are
-partial and do not establish ownership scope or enumerate unused saved environments.
+Account setup enables saved-environment discovery through the public API.
+`cursor_list_environments` reports ownership, repository associations, and an
+optional continuation cursor. Follow the cursor even on empty pages; visibility
+checks and concurrent changes can make the catalog incomplete.

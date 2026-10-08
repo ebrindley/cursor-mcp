@@ -706,7 +706,7 @@ export interface CliCapability {
 }
 
 const RECHECK =
-  "Re-check with cursor_list_environments; it reports availability and never issues an unregistered command.";
+  "Correct the reported configuration or availability problem, then retry the requested environment write.";
 
 function capability(args: {
   availability: CliAvailability;

@@ -188,9 +188,11 @@ phase model.
 
 ## Builds and snapshots
 
-There are no documented `/v1/environments` or `/v1/builds` paths in the Cloud
-Agents OpenAPI. The published API-key surface therefore cannot yet be treated as
-the environment control plane.
+The public API now documents `/v1/environments` list/create, environment
+get/update/delete, history, and Build list/get/active reads. The catalog and
+configuration tools use these environment reads with the configured API key.
+Configuration bodies are summarized as digests. Build mutations remain separate
+from the public read surface.
 
 | Capability | Documented surface | Evidence |
 |---|---|---|

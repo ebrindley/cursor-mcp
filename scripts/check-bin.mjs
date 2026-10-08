@@ -71,6 +71,7 @@ const EXPECTED_READ_ONLY_TOOLS = [
   "cursor_list_agents",
   "cursor_list_artifacts",
   "cursor_list_environments",
+  "cursor_list_environment_history",
   "cursor_list_models",
   "cursor_list_owner_actions",
   "cursor_list_repos",
