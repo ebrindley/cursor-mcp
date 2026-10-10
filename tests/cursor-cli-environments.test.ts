@@ -537,6 +537,20 @@ describe("write target resolution", () => {
     expect(readPullRequestUrl({ prUrl: PR_URL })).toBe(PR_URL);
     expect(readPullRequestUrl({ url: "https://example.com/not-a-pr" })).toBeUndefined();
   });
+
+  it.each([
+    { prUrl: "https://user:example-password@github.com/ExampleOrg/ExampleRepo/pull/1" },
+    { pullRequestUrl: `${PR_URL}?token=example-value` },
+    { pr_url: `${PR_URL}#example-fragment` },
+    { pullRequest: { url: "https://user@github.com/ExampleOrg/ExampleRepo/pull/1" } },
+    { url: "https://github.com/pull/1" },
+  ])("does not expose invalid publish PR URL %j", (reply) => {
+    expect(readPullRequestUrl(reply)).toBeUndefined();
+  });
+
+  it("canonicalizes a publish PR URL instead of echoing its original formatting", () => {
+    expect(readPullRequestUrl({ prUrl: `${PR_URL}/` })).toBe(PR_URL);
+  });
 });
 
 describe("write binding", () => {
