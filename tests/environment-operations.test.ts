@@ -586,6 +586,16 @@ describe("qualification", () => {
     builds: page([row({ buildId: "bld-boot" })]),
   };
 
+  it.each([false, true])("keeps conflicting prepared-Build statuses indeterminate (reverse=%s)", (reverse) => {
+    const rows = [row({ buildId: "bld-boot", status: "SUCCEEDED" }), row({ buildId: "bld-boot", status: "FAILED" })];
+    const result = qualifyLayers({
+      environmentPublicId: ENV,
+      report: { ...base, builds: page(reverse ? rows.reverse() : rows) },
+    });
+    expect(result.preparedBuild).toBe("indeterminate");
+    expect(result.layers.preparedBuild.evidence.join(" ")).toContain("conflicting");
+  });
+
   it("keeps an empty Start-execution record indeterminate, not failed", () => {
     const result = qualifyLayers({
       environmentPublicId: ENV,

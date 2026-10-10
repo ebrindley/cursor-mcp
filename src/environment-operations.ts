@@ -2068,14 +2068,15 @@ export function qualifyLayers(args: {
 }): QualificationView {
   const info = args.report.environmentInfo;
   const currentRunBuildId = info?.build?.buildId;
-  const rows = [
-    ...(args.report.builds?.builds ?? []),
-    ...(args.report.morePages ?? []).flatMap((page) => page.builds),
+  const pages = [
+    ...(args.report.builds === undefined ? [] : [args.report.builds]),
+    ...(args.report.morePages ?? []),
   ];
-  const currentRow =
+  const currentMatch =
     currentRunBuildId === undefined
       ? undefined
-      : rows.find((row) => row.buildId === currentRunBuildId);
+      : findBuild(pages, currentRunBuildId, args.environmentPublicId);
+  const currentRow = currentMatch?.status === "matched" ? currentMatch.build : undefined;
 
   const preparedBuild: QualificationLayer = { result: "indeterminate", evidence: [] };
   if (currentRunBuildId === undefined) {
@@ -2084,7 +2085,9 @@ export function qualifyLayers(args: {
     );
   } else {
     preparedBuild.evidence.push(`current-run buildId=${currentRunBuildId} (boot provenance, not the active Build)`);
-    if (currentRow === undefined) {
+    if (currentMatch?.status === "ambiguous") {
+      preparedBuild.evidence.push("That buildId has conflicting statuses in the Build rows read, so preparation is indeterminate.");
+    } else if (currentRow === undefined) {
       preparedBuild.evidence.push(
         "That buildId was not matched in the Build rows read, so its status is unknown.",
       );
