@@ -1151,6 +1151,25 @@ describe("run export serialization", () => {
 describe("run export byte ceilings", () => {
   const signal = () => new AbortController().signal;
 
+  it("does not retain running terminal status after a completion cannot fit", async () => {
+    const frame = (payload: unknown) => `event: tool_call\ndata: ${JSON.stringify(payload)}\n\n`;
+    const parts: string[] = [];
+    for (let i = 0; i < 520; i++) parts.push(frame({
+      callId: `long-command-${i}`, name: "run_terminal_cmd", status: "running",
+      args: { command: `printf '${"x".repeat(4080)}'` },
+    }));
+    for (let i = 0; i < 520; i++) parts.push(frame({
+      callId: `long-command-${i}`, name: "run_terminal_cmd", status: "completed",
+      result: { success: { executionTime: 12 } },
+    }));
+    parts.push("event: done\ndata: {}\n\n");
+    const capture = await captureRunStream(chunked(parts.join("")), { signal: signal(), write: async () => {} });
+    expect(capture.calls).toHaveLength(520);
+    expect(capture.calls.every(call => call.completed)).toBe(true);
+    expect(capture.terminalTruncated).toBe(true);
+    expect(capture.terminal.every(entry => entry.status === "completed")).toBe(true);
+  });
+
   it("calls a clipped chunk a byte-limit even when done was inside the part that fit", async () => {
     const body = `event: done\ndata: {}\n\n${"x".repeat(64)}`;
     let persisted = 0;
