@@ -408,6 +408,25 @@ describe("trigger attribution", () => {
     expect(result.source).toBe("baseline-difference");
   });
 
+  it("does not adopt a returned id that was already in the baseline", () => {
+    const result = attribute({
+      trigger: { buildId: "bld-old" }, baselineBuildIds: ["bld-old"],
+      rows: [row({ buildId: "bld-old" })], otherActiveRuns: 0,
+    });
+    expect(result.status).toBe("ATTRIBUTION_AMBIGUOUS");
+    expect(result.buildId).toBeUndefined();
+    expect(result.nextSteps.join(" ")).toContain("Do not trigger another Build");
+  });
+
+  it.each([-1, 0.5, Number.NaN])("does not attribute by difference with invalid active-run count %s", (otherActiveRuns) => {
+    const result = attribute({
+      trigger: {}, baselineBuildIds: ["bld-old"],
+      rows: [row({ buildId: "bld-new" })], otherActiveRuns,
+    });
+    expect(result.status).toBe("ATTRIBUTION_AMBIGUOUS");
+    expect(result.buildId).toBeUndefined();
+  });
+
   it("will not attribute by difference when active-run evidence is missing", () => {
     const result = attribute({
       trigger: {},
