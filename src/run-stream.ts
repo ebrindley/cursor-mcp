@@ -1,6 +1,8 @@
 /** Bounded SSE consumption. Transport and policy remain with their existing owners. */
 import { SseParser, type SseEvent } from "./sse.js";
 import { capBytes, sanitize } from "./untrusted.js";
+import { currentRequestScope } from "./request-context.js";
+import { createWaitScope, within } from "./wait.js";
 
 export const MAX_STREAM_BYTES = 1_048_576;
 export const RESUME_ID = /^[\x21-\x7e]{1,256}$/;
@@ -31,6 +33,8 @@ export async function consumeRunStream(
   onCounts?: StreamCounts,
 ): Promise<StreamTail> {
   if (!response.body) throw new Error("Run stream has no response body");
+  const observation = createWaitScope({ timeoutMs: 45_000, parent: currentRequestScope(), signal });
+  signal = observation.signal;
   const reader = response.body.getReader();
   const parser = new SseParser(lastEventId);
   const result: StreamTail = {
@@ -70,7 +74,7 @@ export async function consumeRunStream(
   };
   try {
     while (!stopped && !signal.aborted) {
-      const { done, value } = await reader.read();
+      const { done, value } = await within(observation, () => reader.read());
       if (signal.aborted) break;
       if (done) break;
       const room = MAX_STREAM_BYTES - result.bytesRead;
@@ -109,8 +113,8 @@ export async function consumeRunStream(
   } finally {
     signal.removeEventListener("abort", onAbort);
     // Explicit cancel releases the undici connection; never drain an unbounded stream.
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
+    void reader.cancel().catch(() => {}).finally(() => { try { reader.releaseLock(); } catch {} });
+    observation.dispose();
   }
 
   function conservativeCursor() {

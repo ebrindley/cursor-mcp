@@ -21,6 +21,8 @@
  */
 
 import { ModelInputSchema, modelSelection, type ModelInput } from "../model-selection.js";
+import { requestScope, withWaitScope } from "../request-context.js";
+import { WaitStoppedError, within, sleep as boundedSleep, delay } from "../wait.js";
 import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -30,7 +32,6 @@ import {
   CursorCancelledError,
   currentRequestProgress,
   currentRequestSignal,
-  pause,
   seg,
 } from "../client.js";
 import type { GateableConfig, ToolSpec } from "./register.js";
@@ -233,8 +234,8 @@ export interface AgentToolHooks {
 }
 
 const REAL_TIME: AgentToolHooks = {
-  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  now: () => Date.now(),
+  sleep: delay,
+  now: () => performance.now(),
 };
 const Page = {
   limit: z.number().int().min(1).max(100).optional(),
@@ -262,6 +263,7 @@ export function registerAgentTools(
 
   define({
     name: "cursor_list_agents",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: list agents",
       description:
@@ -312,11 +314,10 @@ export function registerAgentTools(
         args.prUrl === undefined
           ? undefined
           : assertPullRequestUrlShape(args.prUrl).canonical;
-      const deadline = new AbortController();
-      const timer = setTimeout(() => deadline.abort(), MAX_BATCH_MS);
+      const observation = requestScope(MAX_BATCH_MS);
       const caller = currentRequestSignal();
-      const signal = caller ? AbortSignal.any([deadline.signal, caller]) : deadline.signal;
-      try {
+      const signal = observation.signal;
+      try { return await withWaitScope(observation, async () => {
         const payload = await client.get("/v1/agents", AgentListSchema, {
           query: { limit: args.limit, cursor: args.cursor, includeArchived: args.includeArchived, prUrl },
           signal,
@@ -340,7 +341,7 @@ export function registerAgentTools(
             const index = pending[next++]!;
             if (signal.aborted) { unresolved += 1; continue; }
             try {
-              const resolved = await scope.resolve(payload.items[index]!.id, { signal });
+              const resolved = await within(observation, () => scope.resolve(payload.items[index]!.id, { signal }));
               if (resolved.verdict === "allowed") decided[index] = resolved.agent;
               else if (resolved.verdict === "unresolved") unresolved += 1;
             } catch {
@@ -349,7 +350,7 @@ export function registerAgentTools(
           }
         };
         await Promise.all(Array.from({ length: Math.min(SCOPE_CONCURRENCY, pending.length) }, worker));
-        if (caller?.aborted) throw new CursorCancelledError("Agent list cancelled");
+        if (observation.stopReason() !== undefined && observation.stopReason() !== "deadline") throw new CursorCancelledError("Agent list cancelled");
         const agents = decided.filter((agent): agent is Agent => agent !== undefined);
         const lines = agents.map(agentLine);
         if (unresolved > 0) {
@@ -400,11 +401,11 @@ export function registerAgentTools(
           },
           policy,
         });
-      } catch (error) {
-        if (deadline.signal.aborted && !caller?.aborted)
+      }); } catch (error) {
+        if (observation.stopReason() === "deadline")
           throw new CursorTransportError(`Agent list exceeded the ${MAX_BATCH_MS}ms total deadline`);
         throw error;
-      } finally { clearTimeout(timer); }
+      } finally { observation.dispose(); }
     },
   });
 
@@ -528,6 +529,7 @@ export function registerAgentTools(
 
   define({
     name: "cursor_inspect_runs",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: inspect several runs",
       // Short on purpose: every registered description costs the client context
@@ -617,12 +619,9 @@ export function registerAgentTools(
       }
 
       const started = hooks.now();
-      const bound = new AbortController();
-      const boundTimer = setTimeout(() => bound.abort(), MAX_BATCH_MS);
-      const caller = currentRequestSignal();
-      const signal =
-        caller === undefined ? bound.signal : AbortSignal.any([caller, bound.signal]);
-      const boundHit = () => bound.signal.aborted && caller?.aborted !== true;
+      const observation = requestScope(MAX_BATCH_MS);
+      const signal = observation.signal;
+      const boundHit = () => observation.stopReason() === "deadline";
 
       // One verdict per distinct agent and one read per distinct pair. A repeated
       // pair still gets its own entry at its own index: deduplication is of
@@ -739,11 +738,11 @@ export function registerAgentTools(
               break;
             }
             try {
-              decision = await decide(pair);
+              decision = await withWaitScope(observation, () => within(observation, () => decide(pair)));
             } catch (error) {
               // The caller's cancellation is the caller's decision and stays an
               // error. Our own deadline is not: it answers with what it has.
-              if (!(error instanceof CursorCancelledError) || !boundHit()) throw error;
+              if (!(error instanceof CursorCancelledError || error instanceof WaitStoppedError) || !boundHit()) throw error;
               stoppedBy = "time-limit";
               remainingFrom = index;
               admit(index, pair, { outcome: "notAttempted", code: "NOT_ATTEMPTED" });
@@ -758,7 +757,7 @@ export function registerAgentTools(
           }
         }
       } finally {
-        clearTimeout(boundTimer);
+        observation.dispose();
       }
 
       const remaining =
@@ -798,6 +797,7 @@ export function registerAgentTools(
 
   define({
     name: "cursor_wait_run",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: wait for run",
       description:
@@ -841,12 +841,9 @@ export function registerAgentTools(
       // every GET, and every sleep. A slow upstream cannot stretch a 45 s wait
       // into a client timeout, which the model would read as failure.
       const started = hooks.now();
-      const bound = new AbortController();
-      const boundTimer = setTimeout(() => bound.abort(), waitMs);
-      const caller = currentRequestSignal();
-      const signal =
-        caller === undefined ? bound.signal : AbortSignal.any([caller, bound.signal]);
-      const boundHit = () => bound.signal.aborted && caller?.aborted !== true;
+      const observation = requestScope(waitMs === 0 ? MAX_RUN_WAIT_MS : waitMs);
+      const signal = observation.signal;
+      const boundHit = () => observation.stopReason() === "deadline";
       // One notification per completed poll, when the client asked for them. The
       // poll interval is at least a second, so the cadence needs no extra gate,
       // and the run's own status stays out of the message: it is Cursor's text,
@@ -855,7 +852,7 @@ export function registerAgentTools(
       let last: Run | undefined;
       let polls = 0;
       const finish = (run: Run, timedOut: boolean) => {
-        const elapsedMs = hooks.now() - started;
+        const elapsedMs = Math.round(hooks.now() - started);
         return ok({
           source: `GET ${path} (polled ${polls}x)`,
           text: [
@@ -868,15 +865,15 @@ export function registerAgentTools(
           policy,
         });
       };
-      try {
+      try { return await withWaitScope(observation, async () => {
         // Under the same bound as the polls: an uncached scope lookup must not
         // run to the client's own deadline. Aborted here there is no state to
         // answer with, so the cancellation error propagates.
-        await scope.assert(args.agentId, { signal });
+        await within(observation, () => scope.assert(args.agentId, { signal }));
         for (;;) {
           let run: Run;
           try {
-            run = await client.get(path, RunSchema, { signal });
+            run = await within(observation, () => client.get(path, RunSchema, { signal }));
           } catch (error) {
             // Our own deadline, not the caller's: answer with the last state
             // seen rather than an error the model would read as failure.
@@ -895,15 +892,21 @@ export function registerAgentTools(
               `${Math.round((hooks.now() - started) / 1000)}s of ${Math.round(waitMs / 1000)}s elapsed`,
           );
           try {
-            await pause(interval, signal, hooks.sleep);
+            if (hooks === REAL_TIME) await boundedSleep(observation, interval);
+            else await within(observation, () => hooks.sleep(interval));
           } catch (error) {
             if (boundHit()) return finish(run, true);
             throw error;
           }
         }
-      } finally {
-        clearTimeout(boundTimer);
-      }
+      }); } catch (error) {
+        if (error instanceof WaitStoppedError) {
+          const detail = error.reason === "deadline" ? "reached its deadline before a run status was observed" : error.reason === "shutdown" ? "stopped because the server shut down" : "was cancelled by the caller";
+          const message = `Run observation ${detail}; the cloud run was not cancelled. Use cursor_get_run with the same ids to inspect it.`;
+          throw error.reason === "deadline" ? new CursorTransportError(message) : new CursorCancelledError(message);
+        }
+        throw error;
+      } finally { observation.dispose(); }
     },
   });
 

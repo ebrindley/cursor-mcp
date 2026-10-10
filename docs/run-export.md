@@ -158,13 +158,28 @@ resolved paths are asserted to be the exact expected children of the root:
   `sidecarError`), and overall `complete` is false, because a partial artifact set
   is not success. A failed sidecar is absent, never half-written.
 
-Cancellation and the 45-second ceiling reach publication too, as far as they
-honestly can. No `link`, `unlink`, or `write` takes a signal, so nothing here
-claims to interrupt a filesystem operation in flight: the state is checked
-*between* steps, and a call abandoned or timed out after the raw file was
-published reports exactly that — `rawPublished: true`, the sidecars it did not
-write as unpublished, and `stoppedBefore: "cancelled"` or `"time-limit"`. What
-already exists on disk is named; what was not attempted is not claimed.
+One monotonic 45-second deadline covers admission, queueing, capture, publication,
+and response cleanup. The five-second reserve applies only when admitting a retry;
+capture can use the whole remaining budget. No `link`, `unlink`, or `write` takes
+a signal, so an operation already in flight may settle after observation stops.
+After observation stops, a separate two-second allowance observes settlement of
+already-owned files and cleanup. If they settle, the response reports definitive
+artifact facts in the existing shape. Otherwise the response returns an
+unconfirmed result. Later publication steps cannot start after expiry.
+
+When filesystem work has not settled, the response has `artifactState:
+"unconfirmed"`, `cleanupState: "unconfirmed"`, and `candidateFiles` relative to
+`dirUnderRoot`. Publication and existence fields (`rawPublished`,
+`toolsPublished`, `terminalPublished`, `partialKept`, and file locations) are
+retained only where confirmed; fields about unsettled operations are omitted.
+Inspect the candidates before retrying. The file owner and
+stream slot stay held until pending writes and authorized cleanup settle. Capture
+facts are separate: `captureStopReason`, when available, preserves an established
+capture failure even if observation later stops for a deadline.
+
+Known, settled results retain their existing shape, including `rawPublished`,
+sidecar publication flags, and `stoppedBefore`. A file published before expiry
+remains valid.
 
 The check before a sidecar is not the only one: a large sidecar's write and close
 can outlast the call, so the state is checked again after its bytes are on disk and

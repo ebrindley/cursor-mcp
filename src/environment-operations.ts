@@ -43,8 +43,11 @@
  */
 
 import { z } from "zod";
+import { currentRequestScope } from "./request-context.js";
 import {
   ENV_LIST_ARGS,
+  CLI_KILL_GRACE_MS,
+  withCliOperation,
   classifyCliRun,
   cliAuthorityBlock,
   cursorCliWriteReadiness,
@@ -2644,7 +2647,11 @@ async function readConfiguration(args: {
  * Success is `PULL_REQUEST_CREATED`. That is not persistence: a PR is not a
  * database Save, and this path never returns `PERSISTED`.
  */
-export async function publishEnvironmentWithCli(
+export async function publishEnvironmentWithCli(request: CliWriteRequest): Promise<CliPublishResult> {
+  return withCliOperation(request.cli, () => publishEnvironmentWithCliWithin(request));
+}
+
+async function publishEnvironmentWithCliWithin(
   request: CliWriteRequest,
 ): Promise<CliPublishResult> {
   const nowMs = request.nowMs ?? Date.now();
@@ -2741,7 +2748,26 @@ export async function publishEnvironmentWithCli(
     };
   }
 
-  const writeRun = await readiness.run(envPublishArgs(environmentPublicId));
+  const scope = currentRequestScope();
+  if (scope?.stopReason() || (scope && scope.remainingMs() < 2 * readiness.cli.timeoutMs + CLI_KILL_GRACE_MS)) {
+    return {
+      status: "CLI_OPERATION_BUDGET_EXHAUSTED", operation: "publish", dispatched: false,
+      environmentPublicId, reason: "The remaining operation budget cannot cover dispatch, verification, and termination cleanup. Nothing was dispatched.",
+      nextSteps: ["Increase cursorCli.operationTimeoutMs, then re-read and issue a new preview."],
+      cli: writeCliBlock(readiness), trust: CLI_WRITE_TRUST,
+    };
+  }
+
+  const writeRun = await readiness.run(envPublishArgs(environmentPublicId), { write: true });
+  if (writeRun.submitted === false) {
+    const declined = classifyCliRun(writeRun, readiness.cli, "admitting the write");
+    return {
+      status: declined?.status ?? "CLI_NOT_SUBMITTED", operation: "publish", dispatched: false, environmentPublicId,
+      reason: "The CLI write was not submitted. " + (declined?.reason ?? "Dispatch admission closed."),
+      nextSteps: ["Check cursorCli.operationTimeoutMs and issue a fresh preview before retrying."],
+      cli: writeCliBlock(readiness), trust: CLI_WRITE_TRUST,
+    };
+  }
   const problem = classifyCliRun(writeRun, readiness.cli, "publishing the environment");
   if (problem !== undefined) {
     return unknownAfterDispatch({
@@ -2794,7 +2820,11 @@ export async function publishEnvironmentWithCli(
  * Success is `DATABASE_SAVED`, not `PERSISTED`. `PERSISTED` is the delegated
  * verification of an owner dashboard Save and is a different judgement.
  */
-export async function saveEnvironmentWithCli(
+export async function saveEnvironmentWithCli(request: CliWriteRequest & { document: unknown }): Promise<CliSaveResult> {
+  return withCliOperation(request.cli, () => saveEnvironmentWithCliWithin(request));
+}
+
+async function saveEnvironmentWithCliWithin(
   request: CliWriteRequest & { document: unknown },
 ): Promise<CliSaveResult> {
   const nowMs = request.nowMs ?? Date.now();
@@ -2984,7 +3014,26 @@ export async function saveEnvironmentWithCli(
     };
   }
 
-  const writeRun = await readiness.run(envSaveArgs(environmentPublicId), { stdin });
+  const scope = currentRequestScope();
+  if (scope?.stopReason() || (scope && scope.remainingMs() < 2 * readiness.cli.timeoutMs + CLI_KILL_GRACE_MS)) {
+    return {
+      status: "CLI_OPERATION_BUDGET_EXHAUSTED", operation: "save", dispatched: false,
+      environmentPublicId, reason: "The remaining operation budget cannot cover dispatch, verification, and termination cleanup. Nothing was dispatched.",
+      nextSteps: ["Increase cursorCli.operationTimeoutMs, then re-read and issue a new preview."],
+      cli: writeCliBlock(readiness), ...disclose, trust: CLI_WRITE_TRUST,
+    };
+  }
+
+  const writeRun = await readiness.run(envSaveArgs(environmentPublicId), { stdin, write: true });
+  if (writeRun.submitted === false) {
+    const declined = classifyCliRun(writeRun, readiness.cli, "admitting the write");
+    return {
+      status: declined?.status ?? "CLI_NOT_SUBMITTED", operation: "save", dispatched: false, environmentPublicId,
+      reason: "The CLI write was not submitted. " + (declined?.reason ?? "Dispatch admission closed."),
+      nextSteps: ["Check cursorCli.operationTimeoutMs and issue a fresh preview before retrying."],
+      cli: writeCliBlock(readiness), ...disclose, intendedDigest: intended.digest, trust: CLI_WRITE_TRUST,
+    };
+  }
   const problem = classifyCliRun(writeRun, readiness.cli, "saving the environment");
   if (problem !== undefined) {
     return {
@@ -2998,6 +3047,14 @@ export async function saveEnvironmentWithCli(
       }),
       ...disclose,
       intendedDigest: intended.digest,
+    };
+  }
+
+  if (scope?.stopReason()) {
+    return {
+      ...unknownAfterDispatch({ operation: "save", environmentPublicId, readiness,
+        reason: "Caller observation stopped after dispatch. No readback was started; the write outcome remains unknown and is not replayed." }),
+      ...disclose, intendedDigest: intended.digest,
     };
   }
 
@@ -3050,7 +3107,11 @@ export async function saveEnvironmentWithCli(
  * digest, and used only as argv. It is never accepted from the caller and never
  * returned.
  */
-export async function deleteEnvironmentWithCli(
+export async function deleteEnvironmentWithCli(request: CliWriteRequest): Promise<CliDeleteResult> {
+  return withCliOperation(request.cli, () => deleteEnvironmentWithCliWithin(request));
+}
+
+async function deleteEnvironmentWithCliWithin(
   request: CliWriteRequest,
 ): Promise<CliDeleteResult> {
   const nowMs = request.nowMs ?? Date.now();
@@ -3172,7 +3233,26 @@ export async function deleteEnvironmentWithCli(
     };
   }
 
-  const writeRun = await readiness.run(envDeleteArgs(target.internalId));
+  const scope = currentRequestScope();
+  if (scope?.stopReason() || (scope && scope.remainingMs() < 2 * readiness.cli.timeoutMs + CLI_KILL_GRACE_MS)) {
+    return {
+      status: "CLI_OPERATION_BUDGET_EXHAUSTED", operation: "delete", dispatched: false,
+      environmentPublicId, reason: "The remaining operation budget cannot cover dispatch, verification, and termination cleanup. Nothing was dispatched.",
+      nextSteps: ["Increase cursorCli.operationTimeoutMs, then re-read and issue a new preview."],
+      cli: writeCliBlock(readiness), trust: CLI_WRITE_TRUST,
+    };
+  }
+
+  const writeRun = await readiness.run(envDeleteArgs(target.internalId), { write: true });
+  if (writeRun.submitted === false) {
+    const declined = classifyCliRun(writeRun, readiness.cli, "admitting the write");
+    return {
+      status: declined?.status ?? "CLI_NOT_SUBMITTED", operation: "delete", dispatched: false, environmentPublicId,
+      reason: "The CLI write was not submitted. " + (declined?.reason ?? "Dispatch admission closed."),
+      nextSteps: ["Check cursorCli.operationTimeoutMs and issue a fresh preview before retrying."],
+      cli: writeCliBlock(readiness), trust: CLI_WRITE_TRUST,
+    };
+  }
   const problem = classifyCliRun(writeRun, readiness.cli, "deleting the environment");
   if (problem !== undefined) {
     return unknownAfterDispatch({
@@ -3181,6 +3261,13 @@ export async function deleteEnvironmentWithCli(
       readiness,
       reason: `${problem.reason} After dispatch the outcome is unknown.`,
     });
+  }
+
+  if (scope?.stopReason()) {
+    return {
+      ...unknownAfterDispatch({ operation: "delete", environmentPublicId, readiness,
+        reason: "Caller observation stopped after dispatch. No readback was started; the write outcome remains unknown and is not replayed." }),
+    };
   }
 
   const listed = await readCliJson({

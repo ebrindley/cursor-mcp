@@ -1,5 +1,7 @@
 import { expect, test, vi } from 'vitest';
 import { CursorTerminalConnector, TerminalFailure, TerminalGateway, type Pod } from '../src/terminal-gateway.js';
+import { createWaitScope } from '../src/wait.js';
+import { withWaitScope } from '../src/request-context.js';
 
 const pod: Pod = { tenantId: 'tenant-test', podId: 'pod-test', cluster: 'cluster-test', networkToken: 'private-network', ptyAuthToken: 'private-pty' };
 const encode = (value: unknown, flags = 0) => {
@@ -182,10 +184,12 @@ test.each([true, false, 'omitted', null, 'malformed', 'network', 401, 403, 404, 
 
 test.each(['auth', 'discovery', 'opening', 'rpc'] as const)('probe cancellation bounds in-flight %s', async phase => {
   const controller = new AbortController();
+  const observer = createWaitScope({ timeoutMs: 30000, signal: controller.signal });
   const sockets: Socket[] = [];
+  let releaseFetch: ((response: Response) => void) | undefined;
   const fetcher = vi.fn(async (url, init) => {
     if ((phase === 'auth' && String(url).endsWith('exchange_user_api_key')) || (phase === 'discovery' && String(url).endsWith('GetMachine')))
-      return new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+      return new Promise<Response>((resolve, reject) => { releaseFetch = resolve; init!.signal!.addEventListener('abort', () => reject(new Error('aborted')), { once: true }); });
     return Response.json(String(url).endsWith('exchange_user_api_key') ? { accessToken: 'private-account' } : { machine: { pod } });
   }) as typeof fetch;
   const connector = new CursorTerminalConnector('private-api-key', 'bc-test', fetcher, () => {
@@ -193,15 +197,76 @@ test.each(['auth', 'discovery', 'opening', 'rpc'] as const)('probe cancellation 
     const socket = new Socket(); sockets.push(socket); return socket as unknown as WebSocket;
   });
   let peer: Awaited<ReturnType<typeof connector.connect>>['peer'] | undefined;
-  const pending = connector.connect(undefined, controller.signal).then(async connection => {
+  const pending = withWaitScope(observer, () => connector.connect(undefined, controller.signal).then(async connection => {
     peer = connection.peer; return peer.unary('ListPtys', {});
-  }).catch(error => error);
+  })).catch(error => error);
   await vi.waitFor(() => expect(phase === 'auth' ? vi.mocked(fetcher).mock.calls.length : phase === 'discovery' ? vi.mocked(fetcher).mock.calls.length - 1 : peer).toBeTruthy());
   controller.abort();
   const failure = await pending;
   expect(failure).toBeInstanceOf(TerminalFailure);
+  releaseFetch?.(Response.json({ accessToken: 'private-account' }));
+  observer.dispose();
   peer?.close();
   for (const socket of sockets) expect(socket.readyState).toBe(3);
+});
+
+test('one cancelled authentication observer does not cancel another observer or duplicate the exchange', async () => {
+  let release!: (response: Response) => void;
+  const fetcher = vi.fn(async (url: string | URL | Request) => String(url).endsWith('exchange_user_api_key')
+    ? new Promise<Response>(resolve => { release = resolve; }) : Response.json({ machine: { pod } })) as typeof fetch;
+  const connector = new CursorTerminalConnector('private-api-key', 'bc-test', fetcher, () => new Socket() as unknown as WebSocket);
+  const controller = new AbortController();
+  const first = connector.connect(undefined, controller.signal).catch(error => error);
+  const second = connector.connect();
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
+  controller.abort();
+  expect(await first).toMatchObject({ code: 'request_cancelled' });
+  release(Response.json({ accessToken: 'private-account' }));
+  const connection = await second;
+  expect(vi.mocked(fetcher).mock.calls.filter(([url]) => String(url).endsWith('exchange_user_api_key'))).toHaveLength(1);
+  connection.peer.close();
+});
+
+test.each(['fetch', 'body'] as const)('a terminal HTTP %s that ignores cancellation still has a finite observation', async phase => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+  try {
+    const fetcher = vi.fn(async (url: string | URL | Request) => {
+      if (phase === 'fetch') return new Promise<Response>(() => {});
+      if (String(url).endsWith('exchange_user_api_key')) return Response.json({ accessToken: 'private-account' });
+      return { status: 200, ok: true, json: () => new Promise<unknown>(() => {}) } as Response;
+    }) as typeof fetch;
+    const connector = new CursorTerminalConnector('private-api-key', 'bc-test', fetcher, () => new Socket() as unknown as WebSocket);
+    const pending = connector.connect().catch(error => error);
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(await pending).toMatchObject({ code: 'terminal_connection_failed' });
+  } finally { vi.useRealTimers(); }
+});
+
+test('a shorter unary observer stops without cancelling accepted RPC delivery and retains a late acknowledgement', async () => {
+  const f = fixture(), observer = createWaitScope({ timeoutMs: 1000 });
+  const acknowledged = vi.fn();
+  try {
+    const pending = withWaitScope(observer, () => f.gateway.unary('SpawnPty', {}, undefined, acknowledged)).catch(error => error);
+    await vi.waitFor(() => expect(f.socket().sent).toHaveLength(1));
+    observer.stop('caller_cancelled');
+    expect(await pending).toMatchObject({ code: 'request_cancelled', submitted: true });
+    expect(f.socket().sent).toHaveLength(1);
+    f.socket().reply(f.socket().sent[0]!.requestId, { ptyId: 'late-owned' });
+    expect(acknowledged).toHaveBeenCalledWith({ ptyId: 'late-owned' });
+  } finally { observer.dispose(); f.gateway.close(); }
+});
+
+test('an inherited discovery deadline is classified separately from raw caller cancellation', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+  const parent = createWaitScope({ timeoutMs: 1000 });
+  const fetcher = vi.fn(async () => new Promise<Response>(() => {})) as typeof fetch;
+  const connector = new CursorTerminalConnector('private-api-key', 'bc-test', fetcher, () => new Socket() as unknown as WebSocket);
+  try {
+    const pending = withWaitScope(parent, () => connector.connect()).catch(error => error);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await pending).toMatchObject({ code: 'terminal_connection_failed', submitted: false });
+    await vi.advanceTimersByTimeAsync(9000); // The independent authentication owner ends on its own unchanged budget.
+  } finally { parent.dispose(); vi.useRealTimers(); }
 });
 
 test('an idle stream is kept warm by one ListPtys, a received frame restarts the interval, and settling ends keepalives', async () => {

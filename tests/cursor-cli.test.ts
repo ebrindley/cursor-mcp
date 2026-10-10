@@ -17,12 +17,17 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createWaitScope } from "../src/wait.js";
+import { currentRequestScope, withRequestSignal, withWaitScope } from "../src/request-context.js";
 import {
   CliArgumentError,
+  CLI_KILL_GRACE_MS,
   CursorCliSchema,
   ENV_LIST_ARGS,
   cliChildEnv,
+  cliOperationTimeoutMs,
+  boundedCliRunner,
   cursorCliReadiness,
   cursorCliRunner,
   detectCursorCliCapability,
@@ -287,8 +292,98 @@ describe("the bounded runner", () => {
   const savedKey = process.env.CURSOR_API_KEY;
 
   afterEach(() => {
+    vi.useRealTimers();
     if (savedKey === undefined) delete process.env.CURSOR_API_KEY;
     else process.env.CURSOR_API_KEY = savedKey;
+  });
+
+  it("selects and validates the whole-operation budget before admission", async () => {
+    const installed = await install("registered.mjs");
+    const cli = cliFor(installed);
+    expect(cliOperationTimeoutMs(cli)).toBe(45_000);
+    expect(cliOperationTimeoutMs(cliFor(installed, { timeoutMs: 120_000 }))).toBe(362_000);
+    expect(() => cliFor(installed, { operationTimeoutMs: 11_999, publishEnabled: true })).toThrow();
+    expect(() => cliFor(installed, { operationTimeoutMs: 12_000, publishEnabled: true })).toThrow();
+    expect(cliOperationTimeoutMs(cliFor(installed, { operationTimeoutMs: 12_001, publishEnabled: true }))).toBe(12_001);
+    expect(cliOperationTimeoutMs(cliFor(installed, { operationTimeoutMs: 1000 }))).toBe(1000);
+    expect(cliOperationTimeoutMs(cliFor(installed, { operationTimeoutMs: 12_000 }))).toBe(12_000);
+  });
+
+  it("returns cancellation uncertainty without terminating an accepted write before its process deadline", async () => {
+    const installed = await install("write-cancellation.mjs");
+    const cli = cliFor(installed, { timeoutMs: 1_000 });
+    const controller = new AbortController();
+    const started = performance.now();
+    const result = withRequestSignal(controller.signal, () => cursorCliRunner(cli)(["env", "save", "env-alpha"], { write: true }));
+    const marker = join(installed.cwd, "started");
+    const term = join(installed.cwd, "term");
+    const readyDeadline = performance.now() + 600;
+    while (!existsSync(marker) && performance.now() < readyDeadline) await new Promise(resolve => setTimeout(resolve, 10));
+    expect(existsSync(marker)).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    controller.abort();
+    expect(await result).toMatchObject({ outcome: "timed-out", stopReason: "caller_cancelled", submitted: true, stdout: "accepted write\n" });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(existsSync(term)).toBe(false);
+    const containmentDeadline = performance.now() + 1_500;
+    while (!existsSync(term) && performance.now() < containmentDeadline) await new Promise(resolve => setTimeout(resolve, 10));
+    expect(existsSync(term)).toBe(true);
+    expect(performance.now() - started).toBeGreaterThanOrEqual(950);
+  });
+
+  it("gives an injected accepted write an independent owner without repeating dispatch", async () => {
+    const installed = await install("registered.mjs");
+    const cli = cliFor(installed, { timeoutMs: 1_000 });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const controller = new AbortController();
+    const observedStops: boolean[] = [];
+    let dispatches = 0;
+    const runner = boundedCliRunner(cli, async () => {
+      dispatches++;
+      currentRequestScope()!.signal.addEventListener("abort", () => observedStops.push(true));
+      return new Promise<CliRun>(() => {});
+    });
+    const pending = withRequestSignal(controller.signal, () => runner(["env", "save", "env-alpha"], { write: true }));
+    controller.abort();
+    expect(await pending).toMatchObject({ stopReason: "caller_cancelled", submitted: true });
+    expect(observedStops).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(observedStops).toEqual([true]);
+    expect(dispatches).toBe(1);
+  });
+
+  it("does not replenish a parent deadline between readiness children", async () => {
+    const installed = await install("registered.mjs");
+    const cli = cliFor(installed, { timeoutMs: 1_000 });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const scope = createWaitScope({ timeoutMs: 1_000 });
+    const calls: string[] = [];
+    const runner = async (args: readonly string[]): Promise<CliRun> => {
+      calls.push(args.join(" "));
+      await new Promise(resolve => setTimeout(resolve, 600));
+      return { outcome: "exited", exitCode: 0, signal: null, stdout: args[0] === "--version" ? "cursor 1.2.3" : "Commands:\n  env  environments\n  status identity\n", stderr: "", truncated: false };
+    };
+    try {
+      const pending = withWaitScope(scope, () => cursorCliReadiness({ cli, runner, restEmail: OWNER }));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await pending).toMatchObject({ ready: false });
+      expect(calls).toEqual(["--version", "--help"]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(calls).toEqual(["--version", "--help"]);
+    } finally { scope.dispose(); }
+  });
+
+  it("settles with partial output and releases inherited pipes after containment grace", async () => {
+    const installed = await install("ignores-term.mjs");
+    const cli = cliFor(installed, { timeoutMs: 1_000 });
+    const pipeCount = () => process.getActiveResourcesInfo().filter(name => name === "PipeWrap").length;
+    const originalPipes = pipeCount();
+    const started = performance.now();
+    const result = await cursorCliRunner(cli)(ENV_LIST_ARGS);
+    expect(result).toMatchObject({ outcome: "timed-out", stopReason: "deadline", stdout: "partial output\n" });
+    expect(performance.now() - started).toBeLessThan(2_500);
+    await new Promise(resolve => setTimeout(resolve, CLI_KILL_GRACE_MS + 200));
+    expect(pipeCount()).toBeLessThanOrEqual(originalPipes);
   });
 
   it("gives the child no credential, a literal argv, and the configured cwd", async () => {

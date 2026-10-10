@@ -2,6 +2,8 @@ import type { CursorClient } from "./client.js";
 import { seg } from "./client.js";
 import { log } from "./log.js";
 import { IdResponseSchema } from "./schemas.js";
+import { independently, withWaitScope } from "./request-context.js";
+import { createWaitScope, within } from "./wait.js";
 
 export type RejectedRunCleanup = "cancellation-requested" | "cancellation-failed";
 
@@ -14,18 +16,19 @@ export async function cancelRejectedRun(
   agentId: string,
   runId: string,
 ): Promise<RejectedRunCleanup> {
+  const scope = createWaitScope({ timeoutMs: 5_000 });
   try {
-    await client.post(
+    await independently(() => withWaitScope(scope, () => within(scope, () => client.post(
       `/v1/agents/${seg(agentId)}/runs/${seg(runId)}/cancel`,
       IdResponseSchema,
-    );
+    ))));
     return "cancellation-requested";
   } catch (error) {
     log.debug(
       `could not request cancellation for rejected run ${runId}: ${error instanceof Error ? error.message : String(error)}`,
     );
     return "cancellation-failed";
-  }
+  } finally { scope.dispose(); }
 }
 
 export function rejectedRunCleanupMessage(cleanup: RejectedRunCleanup): string {

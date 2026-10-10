@@ -8,10 +8,13 @@ import { isTerminal, RunSchema } from "../schemas.js";
 import { defineTool } from "./register.js";
 import { READ } from "./annotations.js";
 import { ok } from "./result.js";
+import { requestScope, withWaitScope } from "../request-context.js";
+import { within } from "../wait.js";
 
 export function registerRunActivityTool(server: McpServer, client: CursorClient, policy: Policy, scope: AgentScope): string[] {
   const registered = defineTool(server, policy, activeProfile(policy), {
     name: "cursor_tail_run",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: recent run activity",
       description: "Read a bounded run activity excerpt. Pass lastEventId back to resume; without it Cursor replays from the beginning. Status is checked separately. Does not cancel the cloud run.",
@@ -29,40 +32,39 @@ export function registerRunActivityTool(server: McpServer, client: CursorClient,
     },
     handler: async (args: { agentId: string; runId: string; durationMs: number; lastEventId?: string }) => {
       // Includes scope resolution, streaming, and final REST status, not just the body read.
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 45_000);
+      const observation = requestScope(45_000);
       const caller = currentRequestSignal();
-      const signal = caller ? AbortSignal.any([controller.signal, caller]) : controller.signal;
+      const signal = observation.signal;
       // Counts only, at most once a second: a busy run delivers hundreds of
       // events in that time, and the excerpt itself is Cursor's text, which
       // belongs in the tool result and nowhere else.
       const progress = currentRequestProgress();
-      const started = Date.now();
+      const started = observation.clock.now();
       const onCounts = ({ eventsRead, bytesRead }: { eventsRead: number; bytesRead: number }) =>
         progress?.report(
           `reading run activity: ${eventsRead} event${eventsRead === 1 ? "" : "s"}, ` +
-            `${bytesRead} bytes, ${Math.round((Date.now() - started) / 1000)}s elapsed`,
+            `${bytesRead} bytes, ${Math.round((observation.clock.now() - started) / 1000)}s elapsed`,
           1_000,
         );
-      try {
-        await scope.assert(args.agentId, { signal });
+      try { return await withWaitScope(observation, async () => {
+        await within(observation, () => scope.assert(args.agentId, { signal }));
         const path = `/v1/agents/${seg(args.agentId)}/runs/${seg(args.runId)}`;
         const tail = await client.tailRun(`${path}/stream`, {
           durationMs: args.durationMs, maxBytes: Math.max(128, policy.maxResponseBytes - 512),
-          deadlineSignal: controller.signal,
+          deadlineSignal: observation.signal,
           ...(caller === undefined ? {} : { signal: caller }),
           ...(args.lastEventId === undefined ? {} : { lastEventId: args.lastEventId }),
           ...(progress === undefined ? {} : { onCounts }),
         });
         let status: string | undefined;
         try {
-          const run = await client.get(path, RunSchema, { signal });
+          const run = await within(observation, () => client.get(path, RunSchema, { signal }));
           if (run.id === args.runId && run.agentId === args.agentId && run.status.length <= 128) status = run.status;
         } catch {
           // Activity can still be useful when REST is unavailable. Never turn
           // its stream status or done event into a terminal-state claim.
         }
-        if (caller?.aborted) throw new CursorCancelledError("Run activity read cancelled; the cloud run was not cancelled");
+        if (observation.stopReason() !== undefined && observation.stopReason() !== "deadline") throw new CursorCancelledError("Run activity read cancelled; the cloud run was not cancelled");
         const { text, ...metadata } = tail;
         return ok({
           source: `run activity ${args.agentId}/${args.runId}`, policy,
@@ -72,7 +74,7 @@ export function registerRunActivityTool(server: McpServer, client: CursorClient,
           structured: { ...metadata, replayRequired: tail.lastEventId === undefined, statusVerified: status !== undefined,
             ...(status === undefined ? {} : { status, terminal: isTerminal(status) }) },
         });
-      } finally { clearTimeout(timer); }
+      }); } finally { observation.dispose(); }
     },
   });
   return registered ? ["cursor_tail_run"] : [];

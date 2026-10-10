@@ -393,6 +393,7 @@ describe("cursor_refresh_environment_toolchain", () => {
       environment: ENV_NAME,
       ...DRIFTED_ARGS,
       confirm: true,
+      waitMs: 1,
     });
     expect(result.isError).toBe(false);
     expect(starts).toHaveLength(1);
@@ -422,6 +423,7 @@ describe("cursor_refresh_environment_toolchain", () => {
       environment: ENV_NAME,
       ...DRIFTED_ARGS,
       confirm: true,
+      waitMs: 1,
     });
     expect(starts).toHaveLength(1);
     expect(result.structured.status).toBe("DRAFT_STATUS_UNVERIFIED");

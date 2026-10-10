@@ -112,6 +112,7 @@ export function registerEnvironmentLifecycleTools(
 
   define({
     name: "cursor_run_environment_lifecycle",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: plan environment lifecycle",
       description:
@@ -612,7 +613,7 @@ async function collectReport(args: {
     return {
       kind: "pending",
       resume,
-      reason: `delegation pending  run=${handle.runId}  status=${outcome.runStatus}`,
+      reason: `delegation pending  run=${handle.runId}  status=${outcome.runStatus ?? "(unobserved)"}`,
     };
   }
   if (outcome.state === "failed") {

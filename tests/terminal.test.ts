@@ -4,16 +4,19 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { PolicySchema } from '../src/config.js';
 import { TerminalService } from '../src/terminal.js';
-import { TerminalFailure, type TerminalConnector, type TerminalPeer } from '../src/terminal-gateway.js';
+import { CursorTerminalConnector, TerminalFailure, TerminalGateway, type TerminalConnector, type TerminalPeer } from '../src/terminal-gateway.js';
 import { registerTerminalTools } from '../src/tools/terminal.js';
 import { PolicyError } from '../src/errors.js';
 import { fail } from '../src/tools/result.js';
+import { createWaitScope } from '../src/wait.js';
+import { currentRequestSignal, withWaitScope } from '../src/request-context.js';
 
 function fixture(maxBytes = 65536, maxResults = 32) {
   const calls: string[] = [];
   const attachments: Record<string, unknown>[] = [];
   const peers: { closed: boolean }[] = [];
   const connectFailures: (string | TerminalFailure)[] = [];
+  const connectSignals: (AbortSignal | undefined)[] = [];
   let rejectStream: ((error: Error) => void) | undefined;
   let endStream: (() => void) | undefined;
   let listener: ((event: Record<string, unknown>) => void) | undefined;
@@ -44,6 +47,7 @@ function fixture(maxBytes = 65536, maxResults = 32) {
     return peer;
   };
   const connector: TerminalConnector = { async connect(expected) {
+    connectSignals.push(currentRequestSignal());
     if (holdNext) { holdNext = false; await new Promise<void>(resolve => { releaseConnect = resolve; }); }
     if (connectFailures.length) { const next = connectFailures.shift()!; throw typeof next === 'string' ? new TerminalFailure(next) : next; }
     if (changed && expected) throw new TerminalFailure('machine_changed');
@@ -51,7 +55,7 @@ function fixture(maxBytes = 65536, maxResults = 32) {
   } };
   const service = new TerminalService('bc-test', connector, maxBytes, maxResults);
   const request = (operation: string, commandId = 'one') => ({ operation, sessionId: service.sessionId, commandId, command: "printf 'x\ty'\nexit 7", timeoutMs: 10000 });
-  return { service, calls, request, attachments, peers,
+  return { service, calls, request, attachments, peers, connectSignals,
     event: (event: Record<string, unknown>) => listener!(event),
     breakStream: (code = 'gateway_disconnected') => rejectStream!(new TerminalFailure(code)),
     endStream: () => endStream!(),
@@ -78,6 +82,129 @@ test('protocol exit completes despite a held-open attachment, accepts multiline/
   expect(await f.service.handle(f.request('execute'))).toMatchObject({ exitCode: 7 });
   expect(await f.service.handle({ ...f.request('execute'), command: 'changed' })).toMatchObject({ status: 'command_id_conflict' });
   expect(f.calls.filter(x => x === 'SpawnPty')).toHaveLength(1); f.service.close();
+});
+
+test('accepted command startup sheds the MCP observer context and survives its cancellation', async () => {
+  const f = fixture(), observer = createWaitScope({ timeoutMs: 1000 });
+  try {
+    f.holdConnect();
+    expect(await withWaitScope(observer, () => f.service.handle(f.request('execute')))).toMatchObject({ state: 'starting' });
+    observer.stop('caller_cancelled');
+    expect(f.connectSignals).toEqual([undefined]);
+    f.releaseConnect(); await f.started();
+    expect(f.calls).not.toContain('TerminatePty');
+    f.exit();
+    expect(await f.finished()).toMatchObject({ commandOutcome: 'ended', cleanup: 'process_exited' });
+  } finally { observer.dispose(); f.service.close(); }
+});
+
+test('wake readiness retains its requested allowance after a long bounded precheck', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+  let connects = 0;
+  const wake = vi.fn(async () => true);
+  const service = new TerminalService('bc-test', { wake, async connect() {
+    if (++connects === 1) {
+      await new Promise<void>(resolve => setTimeout(resolve, 25000));
+      return { machineId: 'original', peer: { async unary() { throw new TerminalFailure('gateway_unavailable'); }, async stream() {}, close() {} } };
+    }
+    return new Promise(() => {}); // The adapter ignores its signal.
+  } });
+  try {
+    const pending = service.handle({ operation: 'wake', waitMs: 60000 });
+    await vi.advanceTimersByTimeAsync(45000);
+    expect(wake).toHaveBeenCalledOnce();
+    let settled = false; void pending.then(() => { settled = true; });
+    await Promise.resolve(); expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(40000);
+    expect(await pending).toMatchObject({ wakeOutcome: 'signaled', readiness: 'deadline' });
+  } finally { service.close(); vi.useRealTimers(); }
+});
+
+test('a pending SpawnPty acknowledgement survives a shorter startup observer and enables owned cleanup', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+  const gateways: TerminalGateway[] = [], sockets: PendingSocket[] = [], calls: string[] = [];
+  class PendingSocket extends EventTarget {
+    readyState = 0;
+    spawnId: string | undefined;
+    constructor() { super(); queueMicrotask(() => { this.readyState = 1; this.dispatchEvent(new Event('open')); }); }
+    send(text: string) {
+      const frame = JSON.parse(text);
+      if (frame.type !== 1) return;
+      const method = String(frame.path).split('/').at(-1)!; calls.push(method);
+      if (method === 'SpawnPty') this.spawnId = frame.requestId;
+      else this.reply(frame.requestId, method === 'ListPtys' ? { ptys: [] } : { success: true });
+    }
+    reply(requestId: string, value: unknown) {
+      for (const frame of [{ type: 4, requestId, status: 200 },
+        { type: 3, requestId, body: Buffer.from(JSON.stringify(value)).toString('base64') }, { type: 5, requestId }])
+        this.dispatchEvent(Object.assign(new Event('message'), { data: JSON.stringify(frame) }));
+    }
+    close() { if (this.readyState === 3) return; this.readyState = 3; this.dispatchEvent(new Event('close')); }
+  }
+  let connects = 0;
+  const connector: TerminalConnector = { async connect() {
+    if (++connects === 1) await new Promise<void>(resolve => setTimeout(resolve, 29000));
+    const gateway = new TerminalGateway({ tenantId: 'test', podId: 'pod-test', cluster: 'test', networkToken: 'test', ptyAuthToken: 'test' }, () => {
+      const socket = new PendingSocket(); sockets.push(socket); return socket as unknown as WebSocket;
+    }, 10000, undefined, 0);
+    gateways.push(gateway); return { machineId: 'original', peer: gateway };
+  } };
+  const service = new TerminalService('a', connector);
+  const owned = { sessionId: service.sessionId, commandId: 'pending' };
+  try {
+    await service.handle({ operation: 'execute', ...owned, command: 'exit 0', timeoutMs: 1000 });
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(calls).toEqual(['SpawnPty']);
+    expect(service.retention.activeCommandId).toBe('pending');
+    expect(sockets[0]!.readyState).toBe(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    sockets[0]!.reply(sockets[0]!.spawnId!, { ptyId: 'late-owned' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await service.handle({ operation: 'read', ...owned })).toMatchObject({ state: 'finished', commandOutcome: 'unknown', cleanup: 'process_not_listed' });
+    expect(calls).toEqual(['SpawnPty', 'TerminatePty', 'ListPtys']);
+  } finally { service.close(); for (const gateway of gateways) gateway.close(); vi.useRealTimers(); }
+});
+
+test('independent command startup propagates its deadline source into an explicitly signalled connector', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+  const fetcher = vi.fn(async () => new Promise<Response>(() => {})) as typeof fetch;
+  const connector = new CursorTerminalConnector('private-api-key', 'bc-test', fetcher, () => { throw new Error('not reached'); });
+  let connectionFailure: unknown;
+  const service = new TerminalService('bc-test', { async connect(expected, signal) {
+    await new Promise<void>(resolve => setTimeout(resolve, 29000));
+    try { return await connector.connect(expected, signal); }
+    catch (error) { connectionFailure = error; throw error; }
+  } });
+  const owned = { sessionId: service.sessionId, commandId: 'startup-deadline' };
+  try {
+    await service.handle({ operation: 'execute', ...owned, command: 'exit 0', timeoutMs: 1000 });
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(connectionFailure).toMatchObject({ code: 'terminal_connection_failed', submitted: false });
+    expect(await service.handle({ operation: 'read', ...owned })).toMatchObject({ reason: 'deadline', commandOutcome: 'not_submitted', cleanup: 'not_created' });
+    await vi.advanceTimersByTimeAsync(9000); // Shared authentication keeps its original independent ten-second owner.
+  } finally { service.close(); vi.useRealTimers(); }
+});
+
+test('terminal tool finalization retains an acknowledged wake when an inherited deadline stops readiness', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+  const parent = createWaitScope({ timeoutMs: 45000 });
+  let connects = 0;
+  const supplied = new TerminalService('bc-test', { async wake() { return true; }, async connect() {
+    if (++connects === 1) return { machineId: 'original', peer: { async unary() { throw new TerminalFailure('gateway_unavailable'); }, async stream() {}, close() {} } };
+    return new Promise(() => {});
+  } });
+  const handlers = new Map<string, (args: Record<string, unknown>) => Promise<{ structuredContent?: unknown }>>();
+  const server = {
+    server: {},
+    registerTool(name: string, _config: unknown, handler: (args: Record<string, unknown>) => Promise<{ structuredContent?: unknown }>) { handlers.set(name, handler); },
+  } as unknown as McpServer;
+  registerTerminalTools(server, PolicySchema.parse({ terminal: { agentId: 'bc-test', executeEnabled: true },
+    defaultProfile: 'terminal', profiles: { terminal: { tools: ['*'] } } }), '', supplied);
+  try {
+    const pending = withWaitScope(parent, () => handlers.get('cursor_terminal_wake')!({ waitMs: 60000 }));
+    await vi.advanceTimersByTimeAsync(45000);
+    expect((await pending).structuredContent).toMatchObject({ status: 'wake', wakeOutcome: 'signaled', readiness: 'deadline' });
+  } finally { supplied.close(); parent.dispose(); vi.useRealTimers(); }
 });
 
 test('MCP reads accept larger requested pages, preserve the default and reject above the shared limit', async () => {

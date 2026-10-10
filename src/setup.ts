@@ -1,4 +1,6 @@
 /** Human-facing setup commands. Never invoked by an MCP tool. */
+import { currentRequestScope, requestScope, withWaitScope, independently } from "./request-context.js";
+import { createWaitScope, within } from "./wait.js";
 import { readFile, mkdir, writeFile, access, lstat, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -32,15 +34,28 @@ const setupCatalog = z.object({ items: z.array(z.object({
   id: z.string(), parameters: z.array(z.object({ id: z.string(), values: z.array(z.object({ value: z.string() })) })).optional(),
 })) });
 
-export async function setup(repo: string | undefined, path: string, options: SetupOptions = {},
+async function setupIo<T>(start: () => Promise<T>): Promise<T> { return within(currentRequestScope()!, start); }
+async function setupOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const scope = requestScope(30_000);
+  try { return await withWaitScope(scope, () => within(scope, operation)); }
+  finally { scope.dispose(); }
+}
+export function setup(repo: string | undefined, path: string, options: SetupOptions = {}, env: NodeJS.ProcessEnv = process.env, fetchImpl: typeof fetch = globalThis.fetch): Promise<string> {
+  return setupOperation(() => setupWithin(repo, path, options, env, fetchImpl));
+}
+export function doctor(path: string, offline: boolean, env: NodeJS.ProcessEnv = process.env, fetchImpl: typeof fetch = globalThis.fetch): Promise<Diagnostic[]> {
+  return setupOperation(() => doctorWithin(path, offline, env, fetchImpl));
+}
+
+async function setupWithin(repo: string | undefined, path: string, options: SetupOptions = {},
   env: NodeJS.ProcessEnv = process.env, fetchImpl: typeof fetch = globalThis.fetch): Promise<string> {
   if (repo && options.account) throw new Error("Choose repository scope or account scope, not both.");
   const target = repo ? canonicalRepo(repo) : undefined;
   let original: string | undefined;
   try {
-    const info = await lstat(path);
+    const info = await setupIo(() => lstat(path));
     if (!info.isFile()) throw Object.assign(new Error("Policy must be a regular file; symlinks are not edited."), { code: "EEXIST" });
-    original = await readFile(path, "utf8");
+    original = await setupIo(() => readFile(path, "utf8"));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
@@ -48,7 +63,7 @@ export async function setup(repo: string | undefined, path: string, options: Set
     throw Object.assign(new Error("Existing policy requires --preview or --yes."), { code: "EEXIST" });
   }
   // Keep the raw JSON: schema parsing injects defaults and removes legacy keys.
-  const raw = JSON.parse(original ?? await readFile(new URL("../policy.quickstart.json", import.meta.url), "utf8"));
+  const raw = JSON.parse(original ?? await setupIo(() => readFile(new URL("../policy.quickstart.json", import.meta.url), "utf8")));
   const parsed = PolicySchema.parse(raw);
   const name = raw.defaultProfile;
   if (!name || !activeProfile(parsed)) throw new Error("A valid default profile is required.");
@@ -69,7 +84,7 @@ export async function setup(repo: string | undefined, path: string, options: Set
     }
   }
   else if (original === undefined && target) profile.repos = [target.url];
-  const quickstart = JSON.parse(await readFile(new URL("../policy.quickstart.json", import.meta.url), "utf8"));
+  const quickstart = JSON.parse(await setupIo(() => readFile(new URL("../policy.quickstart.json", import.meta.url), "utf8")));
   const management: string[] = quickstart.profiles[quickstart.defaultProfile].tools;
   profile.tools = [...new Set([...profile.tools, ...management])];
   if (options.environment !== undefined) {
@@ -89,7 +104,7 @@ export async function setup(repo: string | undefined, path: string, options: Set
   if (options.fast !== undefined && (!options.model || !["false", "true"].includes(options.fast))) throw new Error("--fast requires --model and false or true.");
   if (options.model) {
     const client = new CursorClient({ apiKey: readApiKey(env), fetchImpl, totalTimeoutMs: 10_000, timeoutMs: 10_000 });
-    const catalog = await client.get("/v1/models", setupCatalog);
+    const catalog = await setupIo(() => client.get("/v1/models", setupCatalog));
     const entry = catalog.items.find(m => m.id === options.model);
     if (!entry || (options.fast !== undefined && !entry.parameters?.some(p => p.id === "fast" && p.values.some(v => v.value === options.fast)))) {
       throw new Error("Requested model or parameters are unavailable.");
@@ -102,23 +117,29 @@ export async function setup(repo: string | undefined, path: string, options: Set
   const advisory = Object.entries(parsed.profiles).some(([n,p]) => n !== name && deletionTools.some(t => p.tools.includes(t)))
     ? "\nOther profiles contain explicit deletion grants; changing the default profile can activate them." : "";
   if (options.preview) return `Preview; nothing written:\n${changes}${advisory}\nUse the same options with --yes to apply.`;
-  await mkdir(dirname(path), { recursive: true });
+  await setupIo(() => mkdir(dirname(path), { recursive: true }));
   const content = `${JSON.stringify(raw, null, 2)}\n`;
-  if (original === undefined) await writeFile(path, content, { flag: "wx", mode: 0o600 });
+  if (original === undefined) await setupIo(() => writeFile(path, content, { flag: "wx", mode: 0o600 }));
   else {
     const temporary = `${path}.${randomUUID()}.tmp`;
     try {
-      await writeFile(temporary, content, { flag: "wx", mode: 0o600 });
-      if (!(await lstat(path)).isFile() || await readFile(path, "utf8") !== original) throw new Error("Policy changed during setup; retry after reviewing it.");
-      await rename(temporary, path);
-    } finally { await unlink(temporary).catch(() => {}); }
+      await setupIo(() => writeFile(temporary, content, { flag: "wx", mode: 0o600 }));
+      if (!(await setupIo(() => lstat(path))).isFile() || await setupIo(() => readFile(path, "utf8")) !== original) throw new Error("Policy changed during setup; retry after reviewing it.");
+      await setupIo(() => rename(temporary, path));
+    } finally {
+      await independently(async () => {
+        const cleanup = createWaitScope({ timeoutMs: 2_000 });
+        try { await within(cleanup, () => unlink(temporary)); } catch { /* cleanup is best effort */ }
+        finally { cleanup.dispose(); }
+      });
+    }
   }
   return `OK: policy configured. Run doctor and restart your MCP clients.${advisory}\nIf you chose a custom path, pass it as CURSOR_MCP_POLICY to the MCP server.`;
 }
 
 export interface Diagnostic { check: string; status: "ok" | "error" | "info"; message: string }
 
-export async function doctor(
+async function doctorWithin(
   path: string,
   offline: boolean,
   env: NodeJS.ProcessEnv = process.env,
@@ -131,8 +152,8 @@ export async function doctor(
   add("runtime", "ok", `Node ${process.versions.node}`);
   let policy;
   try {
-    await access(path);
-    const loaded = await loadPolicy(path, true);
+    await setupIo(() => access(path));
+    const loaded = await setupIo(() => loadPolicy(path, true));
     const profile = activeProfile(loaded);
     if (!profile || profile.tools.length === 0) throw new Error("no tools");
     for (const repo of profile.repos) if (repo !== "*") canonicalRepo(repo);
@@ -172,7 +193,7 @@ export async function doctor(
   if (!policy) return rows;
   const client = new CursorClient({ apiKey, fetchImpl, totalTimeoutMs: 10_000, timeoutMs: 10_000 });
   try {
-    await client.get("/v1/me", MeSchema);
+    await setupIo(() => client.get("/v1/me", MeSchema));
     add("account", "ok", "Cursor accepted the key. Identity details are not displayed.");
   } catch (error) {
     add("account", "error", diagnosticError(error));
@@ -184,7 +205,7 @@ export async function doctor(
     return rows;
   }
   try {
-    const available = await client.get("/v1/repositories", RepositoriesSchema);
+    const available = await setupIo(() => client.get("/v1/repositories", RepositoriesSchema));
     let keys: Set<string>;
     try { keys = new Set(available.items.map((r) => canonicalRepo(r.url).key)); }
     catch {

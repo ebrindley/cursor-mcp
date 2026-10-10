@@ -1,3 +1,5 @@
+import { waitFor } from "../wait.js";
+import { requestScope } from "../request-context.js";
 /**
  * Bulk archive/unarchive jobs: start, status, cancel.
  *
@@ -153,8 +155,8 @@ export function registerBulkTools(
     }) => {
       const job = lookup(args.jobId);
       if (!job.finished && (args.waitSeconds ?? 0) > 0) {
-        const signal = currentRequestSignal();
-        await Promise.race([job.done, clock.sleep(args.waitSeconds! * 1000, signal)]);
+        const scope = requestScope(args.waitSeconds! * 1000);
+        try { await waitFor(scope, () => job.done); } finally { scope.dispose(); }
       }
       return view(job, args.offset ?? 0, args.limit ?? DEFAULT_PAGE, args.state);
     },

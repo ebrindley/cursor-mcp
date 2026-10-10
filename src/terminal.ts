@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
 import { MAX_OUTPUT_CODE_POINTS } from './terminal-output.js';
-import { setTimeout as delay } from 'node:timers/promises';
+import { createWaitScope, within, sleep, WaitStoppedError, type WaitScope } from './wait.js';
+import { independently, requestScope, withWaitScope } from './request-context.js';
 import { object, TerminalFailure, type TerminalConnector, type TerminalPeer, failureFields } from './terminal-gateway.js';
 
 export type TerminalRequest = { operation: string; sessionId?: string; commandId?: string; command?: string;
@@ -21,13 +22,6 @@ const MAX_REATTACHMENTS = 3;
 /** Transport-class loss only. Cancellation, auth, protocol and reaped-PTY failures are never reattached. */
 const RESUMABLE = new Set(['stream_ended_without_exit', 'gateway_unavailable', 'gateway_disconnected',
   'gateway_send_failed', 'terminal_connection_failed']);
-/** The backoff uses the same global timer as the command deadline, so one clock bounds both. */
-const pause = (ms: number, signal: AbortSignal) => new Promise<boolean>(resolve => {
-  const stop = () => { clearTimeout(timer); resolve(false); };
-  const timer = setTimeout(() => { signal.removeEventListener('abort', stop); resolve(true); }, ms);
-  if (signal.aborted) stop(); else signal.addEventListener('abort', stop, { once: true });
-});
-
 /** One owned process at a time; retained IDs are never evicted and silently executed again. */
 export class TerminalService {
   sessionId = randomUUID();
@@ -41,16 +35,19 @@ export class TerminalService {
   get canRetire() { return !this.active && this.results.size === 0; }
   get retention() { return { retainedResults: this.results.size, activeCommandId: this.active?.commandId ?? null }; }
 
-  private async probe(signal: AbortSignal): Promise<{ status: string; machineId: string | undefined } & ReturnType<typeof failureFields>> {
+  private async probe(scope: WaitScope): Promise<{ status: string; machineId: string | undefined } & ReturnType<typeof failureFields>> {
     let peer: TerminalPeer | undefined, machineId: string | undefined;
     try {
-      ({ peer, machineId } = await this.connector.connect(undefined, signal));
-      const response = await peer.unary('ListPtys', {});
-      if (signal.aborted) return { status: 'request_cancelled', machineId };
+      ({ peer, machineId } = await within(scope, () => this.connector.connect(undefined, scope.signal).then(connection => {
+        if (scope.stopReason()) connection.peer.close();
+        return connection;
+      })));
+      const response = await within(scope, () => peer!.unary('ListPtys', {}));
+      if (scope.stopReason()) return { status: scope.stopReason() === 'deadline' ? 'deadline' : 'request_cancelled', machineId };
       if (response.ptys !== undefined && !Array.isArray(response.ptys)) throw new TerminalFailure('invalid_gateway_response');
       return { status: 'ready', machineId };
     } catch (error) {
-      return { status: error instanceof TerminalFailure ? error.code : 'terminal_unavailable', machineId, ...failureFields(error) };
+      return { status: error instanceof WaitStoppedError ? (error.reason === 'deadline' ? 'deadline' : 'request_cancelled') : error instanceof TerminalFailure ? error.code : 'terminal_unavailable', machineId, ...failureFields(error) };
     } finally { peer?.close(); }
   }
 
@@ -66,41 +63,53 @@ export class TerminalService {
       if (detail.failedOperation !== undefined) result.failedOperation = detail.failedOperation;
     };
     if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 60000) return { ...result, status: 'invalid_request' };
-    const lifetime = AbortSignal.any([this.shutdown.signal, ...(signal ? [signal] : [])]);
-    if (lifetime.aborted) return { ...result, readiness: 'cancelled' };
-    // Precheck and submission have their own bounds; waitMs bounds subsequent readiness work.
-    const precheck = AbortSignal.any([lifetime, AbortSignal.timeout(30000)]);
-    const before = await this.probe(precheck);
-    if (precheck.aborted) return { ...result, readiness: lifetime.aborted ? 'cancelled' : 'deadline' };
-    if (before.status === 'ready') return { ...result, status: 'already_ready', readiness: 'ready' };
-    if (before.status !== 'gateway_unavailable' || !before.machineId || !this.connector.wake) {
-      recordFailure('precheck', before.status, before);
-      return { ...result, readiness: 'unavailable' };
-    }
+    // One encompassing observer, with distinct phase allowances selected before I/O.
+    const lifetime = requestScope(60000 + waitMs);
+    const cancelled = () => lifetime.stop('caller_cancelled');
+    const shutdown = () => lifetime.stop('shutdown');
+    if (signal?.aborted) cancelled(); else signal?.addEventListener('abort', cancelled, { once: true });
+    if (this.shutdown.signal.aborted) shutdown(); else this.shutdown.signal.addEventListener('abort', shutdown, { once: true });
+    const readinessStopped = () => lifetime.stopReason() === 'deadline' ? 'deadline' : 'cancelled';
     try {
-      result.wakeOutcome = await this.connector.wake(lifetime) ? 'signaled' : 'not_signaled';
-    } catch (error) {
-      result.wakeOutcome = error instanceof TerminalFailure && !error.submitted ?
-        (['terminal_permission_denied', 'terminal_authentication_expired'].includes(error.code) ? 'rejected' : 'not_submitted') : 'unknown';
-      recordFailure('submission', error instanceof TerminalFailure ? error.code : 'terminal_connection_failed', failureFields(error));
-      if (result.wakeOutcome !== 'unknown') return { ...result, readiness: lifetime.aborted ? 'cancelled' : 'skipped' };
-    }
-    if (lifetime.aborted) return { ...result, readiness: 'cancelled' };
-    if (!waitMs) return result;
-    const deadline = AbortSignal.timeout(waitMs);
-    const polling = AbortSignal.any([lifetime, deadline]);
-    while (!polling.aborted) {
-      const after = await this.probe(polling);
-      if (after.machineId) result.machineChanged = after.machineId !== before.machineId;
-      if (polling.aborted) break;
-      if (after.status === 'ready') return { ...result, readiness: 'ready' };
-      if (after.status !== 'gateway_unavailable') {
-        recordFailure('readiness', after.status, after);
+      const precheck = lifetime.child(30000);
+      let before: Awaited<ReturnType<TerminalService['probe']>>;
+      try { before = await withWaitScope(precheck, () => this.probe(precheck)); }
+      finally { precheck.dispose(); }
+      if (precheck.stopReason()) return { ...result, readiness: precheck.stopReason() === 'deadline' ? 'deadline' : 'cancelled' };
+      if (before.status === 'ready') return { ...result, status: 'already_ready', readiness: 'ready' };
+      if (before.status !== 'gateway_unavailable' || !before.machineId || !this.connector.wake) {
+        recordFailure('precheck', before.status, before);
         return { ...result, readiness: 'unavailable' };
       }
-      try { await delay(1000, undefined, { signal: polling }); } catch { break; }
+      const submission = lifetime.child(30000);
+      try {
+        result.wakeOutcome = await withWaitScope(submission, () => within(submission, () => this.connector.wake!(submission.signal))) ? 'signaled' : 'not_signaled';
+      } catch (error) {
+        result.wakeOutcome = error instanceof TerminalFailure && !error.submitted ?
+          (['terminal_permission_denied', 'terminal_authentication_expired'].includes(error.code) ? 'rejected' : 'not_submitted') : 'unknown';
+        recordFailure('submission', error instanceof WaitStoppedError ? error.reason : error instanceof TerminalFailure ? error.code : 'terminal_connection_failed', failureFields(error));
+        if (result.wakeOutcome !== 'unknown') return { ...result, readiness: lifetime.stopReason() ? readinessStopped() : 'skipped' };
+      } finally { submission.dispose(); }
+      if (lifetime.stopReason()) return { ...result, readiness: readinessStopped() };
+      if (!waitMs) return result;
+      const polling = lifetime.child(waitMs);
+      try {
+        while (!polling.stopReason()) {
+          const after = await withWaitScope(polling, () => this.probe(polling));
+          if (after.machineId) result.machineChanged = after.machineId !== before.machineId;
+          if (polling.stopReason()) break;
+          if (after.status === 'ready') return { ...result, readiness: 'ready' };
+          if (after.status !== 'gateway_unavailable') {
+            recordFailure('readiness', after.status, after);
+            return { ...result, readiness: 'unavailable' };
+          }
+          try { await sleep(polling, 1000); } catch { break; }
+        }
+        return { ...result, readiness: polling.stopReason() === 'deadline' ? 'deadline' : 'cancelled' };
+      } finally { polling.dispose(); }
+    } finally {
+      lifetime.dispose(); signal?.removeEventListener('abort', cancelled); this.shutdown.signal.removeEventListener('abort', shutdown);
     }
-    return { ...result, readiness: lifetime.aborted ? 'cancelled' : 'deadline' };
   }
 
   private snapshot(op: Command, offset = 0, limit = 2000) {
@@ -118,20 +127,31 @@ export class TerminalService {
   }
 
   async handle(request: TerminalRequest, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    if (signal?.aborted) return { status: 'request_cancelled', ...(request.operation === 'execute' ? { commandOutcome: 'not_submitted' } : {}) };
     if (request.operation === 'wake') return this.wake(request.waitMs ?? 30000, signal);
+    const scope = requestScope(45000);
+    const cancel = () => scope.stop('caller_cancelled');
+    if (signal?.aborted) cancel(); else signal?.addEventListener('abort', cancel, { once: true });
+    try { return await withWaitScope(scope, () => within(scope, () => this.dispatch(request, scope.signal))); }
+    catch (error) {
+      if (!(error instanceof WaitStoppedError)) throw error;
+      const op = this.results.get(request.commandId ?? '');
+      return { ...(op ? this.snapshot(op) : {}), status: error.reason === 'deadline' ? 'deadline' : 'request_cancelled',
+        ...(request.operation === 'execute' && !op ? { commandOutcome: 'not_submitted' } : {}) };
+    }
+    finally { scope.dispose(); signal?.removeEventListener('abort', cancel); }
+  }
+
+  private async dispatch(request: TerminalRequest, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    if (signal?.aborted) return { status: 'request_cancelled', ...(request.operation === 'execute' ? { commandOutcome: 'not_submitted' } : {}) };
     if (request.operation === 'status') {
       const base = { sessionId: this.sessionId, agentId: this.agentId, activeCommandId: this.active?.commandId ?? null,
         retainedResults: this.results.size, maxOutputBytes: this.maxOutputBytes, maxResults: this.maxResults };
       if (this.closed) return { ...base, status: 'closed' };
-      let peer: TerminalPeer | undefined;
+      const scope = requestScope(30000);
       try {
-        ({ peer } = await this.connector.connect());
-        const response = await peer.unary('ListPtys', {});
-        if (response.ptys !== undefined && !Array.isArray(response.ptys)) throw new TerminalFailure('invalid_gateway_response');
-        return { ...base, status: 'ready', transport: 'direct_pty', inferenceRequired: false };
-      } catch (error) { return { ...base, status: error instanceof TerminalFailure ? error.code : 'terminal_unavailable', ...failureFields(error) }; }
-      finally { peer?.close(); }
+        const { machineId: _machineId, ...result } = await withWaitScope(scope, () => this.probe(scope));
+        return { ...base, ...result, ...(result.status === 'ready' ? { transport: 'direct_pty', inferenceRequired: false } : {}) };
+      } finally { scope.dispose(); }
     }
     if (request.sessionId !== this.sessionId) return { status: 'session_mismatch', sessionId: this.sessionId };
     if (request.operation === 'reset') {
@@ -148,7 +168,7 @@ export class TerminalService {
       if (!Number.isInteger(offset) || offset < 0 || offset > 65536 || !Number.isInteger(limit) || limit < 1 || limit > MAX_OUTPUT_CODE_POINTS) return { status: 'invalid_request' };
       if (request.operation === 'cancel' && op.state === 'finished' && op.cleanup === 'termination_unconfirmed' && op.ptyId && !this.closed) {
         op.state = 'cleaning';
-        op.cleanup = await this.terminate(op);
+        op.cleanup = await independently(() => this.terminate(op));
         op.state = 'finished';
       } else if (request.operation === 'cancel' && op.state !== 'finished' && op.state !== 'cleaning') {
         op.cancelRequested = true; op.wake?.('cancel_requested');
@@ -175,29 +195,43 @@ export class TerminalService {
       resumable: true, gapCheck: false, seen: new Set(), bytes: Buffer.alloc(0) };
     this.results.set(commandId, op); this.active = op;
     // An MCP request's signal is intentionally not the lifetime of the accepted command.
-    void this.run(op, command, timeoutMs!);
+    void independently(() => this.run(op, command, timeoutMs!));
     return this.snapshot(op);
   }
 
   private async run(op: Command, command: string, timeoutMs: number) {
     const attachment = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const startup = createWaitScope({ timeoutMs: 30000, signal: this.shutdown.signal, signalReason: 'shutdown' });
+    let execution: WaitScope | undefined;
     let finishing = false;
+    let released = false;
     let ended: string | undefined;
     // Settling the outcome also detaches, so a superseded backoff, reconnect or stream cannot outlive it.
     const completion = new Promise<string>(resolve => { op.wake = reason => { ended ??= reason; attachment.abort(); resolve(reason); }; });
     const live = () => ended === undefined && !finishing && !op.cancelRequested && !this.closed;
     const observe = (peer: TerminalPeer) => this.observe(op, peer, attachment.signal, () => !finishing && op.peer === peer);
+    const acknowledgeSpawn = (value: Record<string, unknown>) => {
+      if (typeof value.ptyId !== 'string' || !value.ptyId || op.ptyId === value.ptyId) return;
+      op.ptyId = value.ptyId;
+      // Retain late identities and contain only the command whose execution was already authorized.
+      if (released && !this.closed) void independently(async () => { op.cleanup = await this.terminate(op); });
+    };
     try {
-      const connection = await this.connector.connect();
+      const connection = await withWaitScope(startup, () => within(startup, () => this.connector.connect(undefined, startup.signal).then(connection => {
+        if (startup.stopReason() || finishing) connection.peer.close();
+        return connection;
+      })));
       op.peer = connection.peer; op.machineId = connection.machineId;
       if (this.closed || op.cancelRequested) { op.reason = 'cancelled_before_submission'; return; }
-      const spawned = await op.peer.unary('SpawnPty', { process: { shell: '/bin/bash', args: ['--noprofile', '--norc', '-c', command] },
-        cwd: '/tmp', env: { BASH_ENV: '/dev/null', TERM: 'dumb' }, cols: 80, rows: 24 }, () => { op.commandOutcome = 'unknown'; });
+      const spawned = await withWaitScope(startup, () => within(startup, () => op.peer!.unary('SpawnPty', { process: { shell: '/bin/bash', args: ['--noprofile', '--norc', '-c', command] },
+        cwd: '/tmp', env: { BASH_ENV: '/dev/null', TERM: 'dumb' }, cols: 80, rows: 24 }, () => { op.commandOutcome = 'unknown'; }, acknowledgeSpawn)
+        .then(value => { acknowledgeSpawn(value); return value; })));
       if (typeof spawned.ptyId !== 'string' || !spawned.ptyId) throw new TerminalFailure('spawn_identity_missing', true);
       op.ptyId = spawned.ptyId; op.state = 'running';
       if (this.closed || op.cancelRequested) { op.reason = this.closed ? 'server_closed' : 'cancel_requested'; return; }
-      timer = setTimeout(() => op.wake?.('deadline_exceeded'), timeoutMs);
+      startup.dispose();
+      execution = createWaitScope({ timeoutMs, signal: this.shutdown.signal, signalReason: 'shutdown' });
+      execution.signal.addEventListener('abort', () => op.wake?.(execution!.stopReason() === 'shutdown' ? 'server_closed' : 'deadline_exceeded'), { once: true });
       let lost = observe(connection.peer);
       for (;;) {
         const outcome = await Promise.race([completion.then(reason => ({ reason })), lost.then(code => ({ code }))]);
@@ -205,7 +239,7 @@ export class TerminalService {
         // Losing the stream before PtyExited is a transport event, not an outcome: reattach from the cursor. Without an
         // observed cursor there is nothing to resume from, so the loss keeps today's unknown-outcome path.
         const next = op.resumable && op.lastEventId !== undefined && RESUMABLE.has(outcome.code)
-          ? await this.recover(op, live, observe, attachment.signal) : undefined;
+          ? await this.recover(op, live, observe, execution) : undefined;
         if (next) { lost = next.lost; continue; }
         if (live()) { op.outputReadFailed = true; op.reason = outcome.code === 'stream_ended_without_exit' ? outcome.code : 'output_read_failed'; }
         else op.reason = ended ?? (this.closed ? 'server_closed' : 'cancel_requested');
@@ -213,16 +247,22 @@ export class TerminalService {
       }
     } catch (error) {
       if (error instanceof TerminalFailure && error.submitted) op.commandOutcome = 'unknown';
-      op.reason = error instanceof TerminalFailure ? error.code : 'terminal_execution_failed';
+      op.reason = error instanceof WaitStoppedError ? error.reason : error instanceof TerminalFailure ? error.code : 'terminal_execution_failed';
       Object.assign(op, failureFields(error));
     } finally {
-      finishing = true; clearTimeout(timer);
+      finishing = true; startup.dispose(); execution?.dispose();
       // The deployed AttachPty stream stays open after PtyExited. Detach explicitly.
-      attachment.abort(); op.peer?.close(); delete op.peer; delete op.wake;
       op.state = 'cleaning';
+      attachment.abort();
+      if (op.peer?.settleAccepted && !this.closed) {
+        const settlement = createWaitScope({ timeoutMs: 10000 });
+        try { await within(settlement, () => op.peer!.settleAccepted!()); } catch { /* The original RPC owner still decides delivery. */ }
+        finally { settlement.dispose(); }
+      }
+      op.peer?.close(); delete op.peer; delete op.wake;
       op.cleanup = this.closed ? 'detached' : op.executionEnded ? 'process_exited' :
         op.ptyId ? await this.terminate(op) : op.commandOutcome === 'not_submitted' ? 'not_created' : 'identity_unknown';
-      op.state = 'finished'; if (this.active === op) this.active = undefined;
+      op.state = 'finished'; if (this.active === op) this.active = undefined; released = true;
     }
   }
 
@@ -279,12 +319,16 @@ export class TerminalService {
   /** Reattach a lost stream from its cursor; each connect and each attach consumes one of MAX_REATTACHMENTS. The new
    *  attachment is returned wrapped because awaiting a bare promise here would wait for that attachment's own loss. */
   private async recover(op: Command, live: () => boolean, observe: (peer: TerminalPeer) => Promise<string>,
-    signal: AbortSignal): Promise<{ lost: Promise<string> } | undefined> {
+    scope: WaitScope): Promise<{ lost: Promise<string> } | undefined> {
     const stale = op.peer; delete op.peer; stale?.close();
     while (live() && op.reattachments < MAX_REATTACHMENTS) {
-      if (!await pause(1000 * 2 ** op.reattachments++, signal) || !live()) return undefined;
+      try { await sleep(scope, 1000 * 2 ** op.reattachments++); } catch { return undefined; }
+      if (!live()) return undefined;
       let peer: TerminalPeer;
-      try { ({ peer } = await this.connector.connect(op.machineId, signal)); }
+      try { ({ peer } = await withWaitScope(scope, () => within(scope, () => this.connector.connect(op.machineId, scope.signal).then(connection => {
+        if (scope.stopReason() || !live()) connection.peer.close();
+        return connection;
+      })))); }
       catch (error) { if (!RESUMABLE.has(error instanceof TerminalFailure ? error.code : '')) return undefined; continue; }
       if (!live()) { peer.close(); return undefined; }
       op.peer = peer; op.gapCheck = true;
@@ -294,16 +338,20 @@ export class TerminalService {
   }
 
   private async terminate(op: Command): Promise<string> {
+    const scope = createWaitScope({ timeoutMs: 30000 });
     let peer: TerminalPeer | undefined;
     try {
-      ({ peer } = await this.connector.connect(op.machineId));
-      try { await peer.unary('TerminatePty', { ptyId: op.ptyId }); } catch { /* Verify despite an ambiguous termination reply. */ }
-      const listed = await peer.unary('ListPtys', {});
+      ({ peer } = await withWaitScope(scope, () => within(scope, () => this.connector.connect(op.machineId, scope.signal).then(connection => {
+        if (scope.stopReason()) connection.peer.close();
+        return connection;
+      }))));
+      try { await withWaitScope(scope, () => within(scope, () => peer!.unary('TerminatePty', { ptyId: op.ptyId }))); } catch { /* Verify despite an ambiguous termination reply. */ }
+      const listed = await withWaitScope(scope, () => within(scope, () => peer!.unary('ListPtys', {})));
       if (listed.ptys !== undefined && !Array.isArray(listed.ptys)) return 'termination_unconfirmed';
       return (listed.ptys as unknown[] | undefined ?? []).some(value => object(value) && value.ptyId === op.ptyId)
         ? 'termination_unconfirmed' : 'process_not_listed';
     } catch (error) { return error instanceof TerminalFailure && error.code === 'machine_changed' ? 'machine_changed' : 'termination_unconfirmed'; }
-    finally { peer?.close(); }
+    finally { scope.dispose(); peer?.close(); }
   }
 
   close() {

@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { createWaitScope, within, schedule, WaitStoppedError, type DisposableTimer } from './wait.js';
+import { independently, requestScope, withWaitScope } from './request-context.js';
 
 /** Where a Cursor call failed: the RPC name and observed HTTP status. Never a URL or a body. */
 export interface FailureDetail { httpStatus?: number; operation?: string }
@@ -15,8 +17,10 @@ export const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
 export interface TerminalPeer {
-  unary(method: string, input: Record<string, unknown>, submitted?: () => void): Promise<Record<string, unknown>>;
+  unary(method: string, input: Record<string, unknown>, submitted?: () => void,
+    acknowledged?: (value: Record<string, unknown>) => void): Promise<Record<string, unknown>>;
   stream(method: string, input: Record<string, unknown>, event: (value: Record<string, unknown>) => void, signal: AbortSignal): Promise<void>;
+  settleAccepted?(): Promise<void>;
   close(): void;
 }
 export type Pod = { podId: string; tenantId: string; cluster: string; networkToken: string; ptyAuthToken: string };
@@ -30,7 +34,8 @@ export class TerminalGateway implements TerminalPeer {
   private failOpening: (() => void) | undefined;
   private readonly abort = () => this.close();
   private readonly pending = new Map<string, { socket: WebSocket; streaming: boolean; frame: (value: Record<string, unknown>) => void; fail: (code: string) => void }>();
-  private keepalive: ReturnType<typeof setTimeout> | undefined;
+  private readonly idle = new Set<() => void>();
+  private keepalive: DisposableTimer | undefined;
   constructor(private readonly pod: Pod, private readonly socketFactory: SocketFactory = url => new WebSocket(url),
     private readonly requestTimeoutMs = 10000, private readonly signal?: AbortSignal, private readonly keepaliveMs = 20000) {
     signal?.addEventListener('abort', this.abort, { once: true });
@@ -54,15 +59,20 @@ export class TerminalGateway implements TerminalPeer {
       catch { reject(new TerminalFailure('gateway_unavailable')); return; }
       this.socket = socket;
       let opened = false;
-      const timer = setTimeout(() => { failed(); socket.close(); }, this.requestTimeoutMs);
+      const openingScope = createWaitScope({ timeoutMs: this.requestTimeoutMs });
+      const onDeadline = () => { failed(); socket.close(); };
+      openingScope.signal.addEventListener('abort', onDeadline, { once: true });
       const failed = () => {
-        clearTimeout(timer);
+        openingScope.dispose();
+        openingScope.signal.removeEventListener('abort', onDeadline);
         if (!opened) reject(new TerminalFailure('gateway_unavailable'));
         for (const request of [...this.pending.values()]) if (request.socket === socket) request.fail('gateway_disconnected');
         this.rearm(socket);
       };
       this.failOpening = failed;
-      socket.addEventListener('open', () => { opened = true; clearTimeout(timer); resolve(socket); }, { once: true });
+      socket.addEventListener('open', () => {
+        opened = true; openingScope.dispose(); openingScope.signal.removeEventListener('abort', onDeadline); resolve(socket);
+      }, { once: true });
       socket.addEventListener('error', failed);
       socket.addEventListener('close', failed);
       socket.addEventListener('message', event => {
@@ -87,22 +97,27 @@ export class TerminalGateway implements TerminalPeer {
    *  idle unary keeps the current socket warm. Keepalive failures are ignored: this prevents that drop, it is not a liveness check. */
   private rearm(socket: WebSocket | undefined = this.socket) {
     if (this.socket !== socket) return;
-    clearTimeout(this.keepalive); this.keepalive = undefined;
+    this.keepalive?.dispose(); this.keepalive = undefined;
     if (!socket || this.disposed || !this.keepaliveMs || socket.readyState !== 1 || !this.streams(socket)) return;
-    const timer = setTimeout(() => {
+    const timer = schedule(this.keepaliveMs, () => {
       this.keepalive = undefined;
       if (this.disposed || this.socket !== socket || socket.readyState !== 1 || !this.streams(socket)) return;
-      void this.unary('ListPtys', {}).catch(() => { /* Its send re-arms the timer; a keepalive failure says nothing about the stream. */ });
-    }, this.keepaliveMs);
-    timer.unref?.();
+      void independently(() => this.unary('ListPtys', {})).catch(() => { /* Its send re-arms the timer; a keepalive failure says nothing about the stream. */ });
+    });
+    timer.unref();
     this.keepalive = timer;
   }
 
   private async request(method: string, input: Record<string, unknown>, event?: (value: Record<string, unknown>) => void,
-    signal?: AbortSignal, submitted?: () => void): Promise<Record<string, unknown>> {
-    const socket = await this.open();
-    if (signal?.aborted) throw new TerminalFailure('request_cancelled');
+    signal?: AbortSignal, submitted?: () => void, acknowledged?: (value: Record<string, unknown>) => void): Promise<Record<string, unknown>> {
     const streaming = event !== undefined;
+    // The RPC owner is finite and independent of any one observer.
+    const owner = createWaitScope({ timeoutMs: this.requestTimeoutMs, signal, signalReason: 'caller_cancelled' });
+    let socket: WebSocket;
+    try { socket = await within(owner, () => this.open()); }
+    catch (error) { owner.dispose(); throw error instanceof WaitStoppedError
+      ? new TerminalFailure(error.reason === 'deadline' ? 'gateway_unavailable' : 'request_cancelled') : error; }
+    if (signal?.aborted) { owner.dispose(); throw new TerminalFailure('request_cancelled'); }
     const requestId = randomUUID();
     let body = Buffer.from(JSON.stringify(input));
     if (streaming) { const prefix = Buffer.alloc(5); prefix.writeUInt32BE(body.length, 1); body = Buffer.concat([prefix, body]); }
@@ -112,8 +127,14 @@ export class TerminalGateway implements TerminalPeer {
       let status: number | undefined;
       let buffer = Buffer.alloc(0);
       let streamEnded = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const cleanup = () => { this.pending.delete(requestId); clearTimeout(timer); signal?.removeEventListener('abort', abort); this.rearm(socket); };
+      const cleanup = () => {
+        this.pending.delete(requestId); owner.dispose(); owner.signal.removeEventListener('abort', stopped);
+        signal?.removeEventListener('abort', abort); this.rearm(socket);
+        if (![...this.pending.values()].some(request => !request.streaming)) {
+          for (const done of this.idle) done();
+          this.idle.clear();
+        }
+      };
       const cancelRequest = () => {
         if (socket.readyState === 1 && sent) try { socket.send(JSON.stringify({ type: 2, requestId })); } catch { /* no replay */ }
       };
@@ -123,6 +144,7 @@ export class TerminalGateway implements TerminalPeer {
         reject(new TerminalFailure(code, sent, { operation: method, ...(status === undefined ? {} : { httpStatus: status }) }));
       };
       const abort = () => fail('request_cancelled');
+      const stopped = () => fail(owner.stopReason() === 'deadline' ? 'terminal_rpc_timeout' : 'request_cancelled');
       this.pending.set(requestId, { socket, streaming, fail, frame: frame => {
         if (settled) return;
         try {
@@ -150,13 +172,14 @@ export class TerminalGateway implements TerminalPeer {
             if (streaming && (!streamEnded || buffer.length)) throw new Error();
             const value: unknown = streaming ? {} : JSON.parse(buffer.toString('utf8') || '{}');
             if (!object(value)) throw new Error();
-            settled = true; cleanup(); resolve(value);
+            settled = true; cleanup(); acknowledged?.(value); resolve(value);
           } else if (frame.type === 6) fail('terminal_rpc_failed');
           else throw new Error();
         } catch { fail('invalid_gateway_response'); }
       } });
       signal?.addEventListener('abort', abort, { once: true });
-      if (!streaming) timer = setTimeout(() => fail('terminal_rpc_timeout'), this.requestTimeoutMs);
+      if (!streaming) owner.signal.addEventListener('abort', stopped, { once: true });
+      else owner.dispose(); // Attachment lifetime belongs to its explicit stream signal.
       try {
         if (signal?.aborted) { abort(); return; }
         sent = true; submitted?.();
@@ -168,9 +191,23 @@ export class TerminalGateway implements TerminalPeer {
     });
   }
 
-  unary(method: string, input: Record<string, unknown>, submitted?: () => void) { return this.request(method, input, undefined, undefined, submitted); }
+  unary(method: string, input: Record<string, unknown>, submitted?: () => void,
+    acknowledged?: (value: Record<string, unknown>) => void) {
+    // Observer cancellation does not cancel an accepted RPC or discard its acknowledgement.
+    const observer = requestScope(this.requestTimeoutMs);
+    let sent = false;
+    return within(observer, () => independently(() => this.request(method, input, undefined, undefined, () => { sent = true; submitted?.(); }, acknowledged)))
+      .catch(error => { if (error instanceof WaitStoppedError) throw new TerminalFailure(
+        error.reason === 'deadline' ? 'terminal_rpc_timeout' : 'request_cancelled', sent, { operation: method }); throw error; })
+      .finally(() => observer.dispose());
+  }
   async stream(method: string, input: Record<string, unknown>, event: (value: Record<string, unknown>) => void, signal: AbortSignal) {
     await this.request(method, input, event, signal);
+  }
+  /** Settlement only: pending unary owners retain their existing deadline and never replay. */
+  settleAccepted(): Promise<void> {
+    if (![...this.pending.values()].some(request => !request.streaming)) return Promise.resolve();
+    return new Promise(resolve => { this.idle.add(resolve); });
   }
   close() {
     this.disposed = true;
@@ -196,76 +233,106 @@ export class CursorTerminalConnector implements TerminalConnector {
     private readonly fetcher: typeof fetch = fetch, private readonly socketFactory?: SocketFactory) {}
 
   private async post(path: string, token: string, input: Record<string, unknown>, signal?: AbortSignal, mutation = false) {
-    if (signal?.aborted) throw new TerminalFailure('request_cancelled');
-    // The RPC name is fixed vocabulary from the path; it carries no identifier, token, or body.
+    const scope = requestScope(10000);
     const operation = path.slice(path.lastIndexOf('/') + 1);
-    let response: Response;
+    let submitted = false;
+    const external = () => scope.stop('caller_cancelled');
+    if (signal?.aborted) external(); else signal?.addEventListener('abort', external, { once: true });
     try {
-      response = await this.fetcher(`https://api2.cursor.sh${path}`, { method: 'POST', redirect: 'error',
-        headers: { 'content-type': 'application/json', 'connect-protocol-version': '1', 'x-cursor-client-type': 'cli', authorization: `Bearer ${token}` },
-        body: JSON.stringify(input), signal: AbortSignal.any([AbortSignal.timeout(10000), ...(signal ? [signal] : [])]) });
-    } catch { throw new TerminalFailure(signal?.aborted ? 'request_cancelled' : 'terminal_connection_failed', mutation, { operation }); }
-    if (response.status === 401 || response.status === 403) {
-      this.token = undefined;
-      throw new TerminalFailure(response.status === 401 ? 'terminal_authentication_expired' : 'terminal_permission_denied', false,
-        { httpStatus: response.status, operation });
-    }
-    // Every other rejection keeps its code; the status tells a 429 from a 503 from a dropped connection.
-    if (!response.ok) throw new TerminalFailure(response.status === 404 ? 'machine_unavailable' : 'terminal_connection_failed', mutation,
-      { httpStatus: response.status, operation });
-    let value: unknown;
-    try { value = await response.json(); } catch { throw new TerminalFailure('invalid_machine_response', mutation, { operation }); }
-    if (!object(value)) throw new TerminalFailure('invalid_machine_response', mutation, { operation });
-    return value;
+      return await within(scope, async () => {
+        submitted = true;
+        const response = await this.fetcher(`https://api2.cursor.sh${path}`, { method: 'POST', redirect: 'error',
+          headers: { 'content-type': 'application/json', 'connect-protocol-version': '1', 'x-cursor-client-type': 'cli', authorization: `Bearer ${token}` },
+          body: JSON.stringify(input), signal: scope.signal });
+        if (response.status === 401 || response.status === 403) {
+          this.token = undefined;
+          throw new TerminalFailure(response.status === 401 ? 'terminal_authentication_expired' : 'terminal_permission_denied', false,
+            { httpStatus: response.status, operation });
+        }
+        if (!response.ok) throw new TerminalFailure(response.status === 404 ? 'machine_unavailable' : 'terminal_connection_failed', mutation,
+          { httpStatus: response.status, operation });
+        let value: unknown;
+        try { value = await response.json(); } catch { throw new TerminalFailure('invalid_machine_response', mutation, { operation }); }
+        if (!object(value)) throw new TerminalFailure('invalid_machine_response', mutation, { operation });
+        return value;
+      });
+    } catch (error) {
+      if (error instanceof TerminalFailure) throw error;
+      throw new TerminalFailure(scope.stopReason() && scope.stopReason() !== 'deadline' ? 'request_cancelled' : 'terminal_connection_failed', mutation && submitted, { operation });
+    } finally { scope.dispose(); signal?.removeEventListener('abort', external); }
   }
 
   private async authenticate(signal?: AbortSignal) {
-    if (!this.token) {
-      const exchange = async () => {
-        if (!this.apiKey) throw new TerminalFailure('api_key_missing');
-        const value = await this.post('/auth/exchange_user_api_key', this.apiKey, {}, signal);
-        if (typeof value.accessToken !== 'string' || !value.accessToken) throw new TerminalFailure('invalid_auth_response');
-        this.token = value.accessToken;
-      };
-      // A bounded probe must not cancel an unrelated session's shared authentication.
-      if (signal) await exchange();
-      else {
-        this.authenticating ??= exchange().finally(() => { this.authenticating = undefined; });
-        await this.authenticating;
-      }
-    }
+    if (this.token) return;
+    const observer = requestScope(10000);
+    const cancel = () => observer.stop('caller_cancelled');
+    if (signal?.aborted) cancel(); else signal?.addEventListener('abort', cancel, { once: true });
+    try {
+      await within(observer, () => {
+        this.authenticating ??= independently(async () => {
+          if (!this.apiKey) throw new TerminalFailure('api_key_missing');
+          const value = await this.post('/auth/exchange_user_api_key', this.apiKey, {});
+          if (typeof value.accessToken !== 'string' || !value.accessToken) throw new TerminalFailure('invalid_auth_response');
+          this.token = value.accessToken;
+        }).finally(() => { this.authenticating = undefined; });
+        return this.authenticating;
+      });
+    } catch (error) { if (error instanceof WaitStoppedError) throw new TerminalFailure(error.reason === 'deadline' ? 'terminal_connection_failed' : 'request_cancelled'); throw error; }
+    finally { observer.dispose(); signal?.removeEventListener('abort', cancel); }
   }
 
   async wake(signal?: AbortSignal): Promise<boolean> {
-    await this.authenticate(signal);
-    // Exactly one mutation attempt. Never refresh/retry this POST or change reason.
-    const value = await this.post('/aiserver.v1.BackgroundComposerService/WakeBackgroundComposer', this.token!,
-      { bcId: this.agentId, reason: 1 }, signal, true);
-    const signaled = value.signaled ?? false; // ProtoJSON omits default-false scalars; null also leaves them unset.
-    if (typeof signaled !== 'boolean') throw new TerminalFailure('invalid_wake_response', true);
-    return signaled;
+    const scope = requestScope(30000);
+    let submitted = false;
+    const cancel = () => scope.stop('caller_cancelled');
+    if (signal?.aborted) cancel(); else signal?.addEventListener('abort', cancel, { once: true });
+    try {
+      return await withWaitScope(scope, () => within(scope, async () => {
+        await this.authenticate(scope.signal);
+        // Exactly one mutation attempt. Never refresh/retry this POST or change reason.
+        scope.throwIfStopped();
+        const value = await independently(() => {
+          submitted = true;
+          return this.post('/aiserver.v1.BackgroundComposerService/WakeBackgroundComposer', this.token!,
+            { bcId: this.agentId, reason: 1 }, undefined, true);
+        });
+        const signaled = value.signaled ?? false; // ProtoJSON omits default-false scalars; null also leaves them unset.
+        if (typeof signaled !== 'boolean') throw new TerminalFailure('invalid_wake_response', true);
+        return signaled;
+      }));
+    } catch (error) { if (error instanceof WaitStoppedError) throw new TerminalFailure(error.reason === 'deadline' ? 'terminal_connection_failed' : 'request_cancelled', submitted); throw error; }
+    finally { scope.dispose(); signal?.removeEventListener('abort', cancel); }
   }
 
   async connect(expectedMachineId?: string, signal?: AbortSignal): Promise<TerminalConnection> {
-    if (!this.socketFactory && typeof globalThis.WebSocket !== 'function') throw new TerminalFailure('websocket_runtime_required');
-    const wasCached = !!this.token;
-    await this.authenticate(signal);
-    let value: Record<string, unknown>;
-    try { value = await this.post('/aiserver.v1.BackgroundComposerService/GetMachine', this.token!, { bcId: this.agentId }, signal); }
-    catch (error) {
-      // One refresh for cached-token expiry on this read-only lookup. Never retry a command or a 403.
-      if (!wasCached || !(error instanceof TerminalFailure) || error.code !== 'terminal_authentication_expired') throw error;
-      await this.authenticate(signal);
-      value = await this.post('/aiserver.v1.BackgroundComposerService/GetMachine', this.token!, { bcId: this.agentId }, signal);
-    }
-    const pod = object(value.machine) && object(value.machine.pod) ? value.machine.pod : undefined;
-    if (!pod) throw new TerminalFailure('machine_unavailable');
-    if (!['podId', 'tenantId', 'cluster', 'networkToken', 'ptyAuthToken'].every(key => typeof pod[key] === 'string' && pod[key]))
-      throw new TerminalFailure('terminal_unavailable');
-    const routing = pod as Pod;
-    const machineId = `${routing.tenantId}/${routing.cluster}/${routing.podId}`;
-    if (expectedMachineId !== undefined && expectedMachineId !== machineId) throw new TerminalFailure('machine_changed');
-    if (signal?.aborted) throw new TerminalFailure('request_cancelled');
-    return { machineId, peer: new TerminalGateway(routing, this.socketFactory, 10000, signal) };
+    const scope = requestScope(30000);
+    const cancel = () => scope.stop('caller_cancelled');
+    if (signal?.aborted) cancel(); else signal?.addEventListener('abort', cancel, { once: true });
+    try {
+      return await withWaitScope(scope, () => within(scope, async () => {
+        if (!this.socketFactory && typeof globalThis.WebSocket !== 'function') throw new TerminalFailure('websocket_runtime_required');
+        const wasCached = !!this.token;
+        await this.authenticate(signal);
+        let value: Record<string, unknown>;
+        try { value = await this.post('/aiserver.v1.BackgroundComposerService/GetMachine', this.token!, { bcId: this.agentId }, signal); }
+        catch (error) {
+          // One refresh for cached-token expiry on this read-only lookup. Never retry a command or a 403.
+          if (!wasCached || !(error instanceof TerminalFailure) || error.code !== 'terminal_authentication_expired') throw error;
+          await this.authenticate(signal);
+          value = await this.post('/aiserver.v1.BackgroundComposerService/GetMachine', this.token!, { bcId: this.agentId }, signal);
+        }
+        const pod = object(value.machine) && object(value.machine.pod) ? value.machine.pod : undefined;
+        if (!pod) throw new TerminalFailure('machine_unavailable');
+        if (!['podId', 'tenantId', 'cluster', 'networkToken', 'ptyAuthToken'].every(key => typeof pod[key] === 'string' && pod[key]))
+          throw new TerminalFailure('terminal_unavailable');
+        const routing = pod as Pod;
+        const machineId = `${routing.tenantId}/${routing.cluster}/${routing.podId}`;
+        if (expectedMachineId !== undefined && expectedMachineId !== machineId) throw new TerminalFailure('machine_changed');
+        if (signal?.aborted) throw new TerminalFailure('request_cancelled');
+        // Discovery's observer must not become the shared socket's owner.
+        return { machineId, peer: independently(() => new TerminalGateway(routing, this.socketFactory)) };
+      }));
+    } catch (error) { if (error instanceof WaitStoppedError) throw new TerminalFailure(error.reason === 'deadline' ? 'terminal_connection_failed' : 'request_cancelled'); throw error; }
+    finally { scope.dispose(); signal?.removeEventListener('abort', cancel); }
   }
 }

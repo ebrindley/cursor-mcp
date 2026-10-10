@@ -15,6 +15,7 @@
  */
 
 import { log } from "./log.js";
+import { systemClock } from "./wait.js";
 import { capBytes, sanitize } from "./untrusted.js";
 
 /** The token the client supplied. Zero is a valid token, so absence is `undefined`. */
@@ -56,7 +57,7 @@ export class ProgressReporter {
   constructor(send: ProgressSend, token: ProgressToken, options: ProgressOptions = {}) {
     this.#send = send;
     this.#token = token;
-    this.#now = options.now ?? Date.now;
+    this.#now = options.now ?? systemClock.now;
   }
 
   /** Notifications sent so far. The value carried by the next send is this plus one. */

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { CursorClient, seg } from "../src/client.js";
+import { createWaitScope } from "../src/wait.js";
+import { withWaitScope } from "../src/request-context.js";
 import {
   CursorApiError,
   CursorContractError,
@@ -28,6 +30,40 @@ const json = (body: unknown, init: ResponseInit = {}) =>
   });
 
 describe("caller cancellation", () => {
+  it("bounds a write even when fetch ignores cancellation and does not replay it", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(() => new Promise(() => {}));
+    const pending = client(fetchImpl, { timeoutMs: 10, totalTimeoutMs: 30 }).post("/v1/agents", OK);
+    await expect(pending).rejects.toThrow(/timed out.*outcome is unknown/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds a stalled response body and preserves write uncertainty", async () => {
+    const response = new Response(new ReadableStream({ pull: () => new Promise(() => {}) }));
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response);
+    await expect(client(fetchImpl, { timeoutMs: 10 }).post("/v1/agents", OK)).rejects.toThrow(/outcome is unknown/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not label an enclosing deadline as caller cancellation", async () => {
+    const scope = createWaitScope({ timeoutMs: 10 });
+    const fetchImpl = vi.fn<typeof fetch>(() => new Promise(() => {}));
+    try {
+      await expect(withWaitScope(scope, () => client(fetchImpl).get("/v1/me", OK, { retry: false }))).rejects.toThrow(/timed out|total deadline/);
+    } finally { scope.dispose(); }
+  });
+
+  it("admits no second request after a composed budget expires", async () => {
+    let elapsed = 0;
+    const scope = createWaitScope({ timeoutMs: 10, clock: { now: () => elapsed, wallNow: Date.now } });
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => { elapsed = 11; return json({ id: "a" }); });
+    try {
+      await withWaitScope(scope, async () => {
+        await client(fetchImpl).get("/v1/me", OK).catch(() => {});
+        await expect(client(fetchImpl).post("/v1/agents", OK)).rejects.toThrow(/not dispatched|total deadline/);
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    } finally { scope.dispose(); }
+  });
   const abortingFetch: typeof fetch = (_u, init) =>
     new Promise((_resolve, reject) => {
       if (init?.signal?.aborted) {

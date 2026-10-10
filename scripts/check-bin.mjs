@@ -1,22 +1,26 @@
-import { spawn, spawnSync } from "node:child_process";
+import { createWaitScope, within, sleep } from "../dist/wait.js";
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-const dir = await mkdtemp(join(tmpdir(), "cursor-mcp-bin-"));
+const operationScope = createWaitScope({ timeoutMs: 20_000 });
+const io = start => within(operationScope, start);
+const dir = await io(() => mkdtemp(join(tmpdir(), "cursor-mcp-bin-")));
 const policyPath = join(dir, "policy.json");
 const binPath = join(dir, "cursor-mcp");
 
-await writeFile(
+await io(() => writeFile(
   policyPath,
   JSON.stringify({
     defaultProfile: "read",
     profiles: { read: { tools: ["read:*"] } },
   }),
   "utf8",
-);
-await symlink(resolve("dist/bin.js"), binPath);
+));
+await io(() => symlink(resolve("dist/bin.js"), binPath));
+operationScope.throwIfStopped();
 
 const child = spawn(process.execPath, [binPath], {
   env: {
@@ -26,10 +30,20 @@ const child = spawn(process.execPath, [binPath], {
   },
   stdio: ["pipe", "pipe", "pipe"],
 });
+const stopChild = processChild => {
+  processChild.kill("SIGKILL");
+  processChild.stdin?.destroy();
+  processChild.stdout?.destroy();
+  processChild.stderr?.destroy();
+  processChild.unref();
+};
 const closed = new Promise((resolveExit) => child.once("close", resolveExit));
 
 let stdout = "";
 let stderr = "";
+child.stdin.on("error", () => {});
+child.stdout.on("error", () => {});
+child.stderr.on("error", () => {});
 child.stdout.on("data", (chunk) => {
   stdout += chunk.toString();
 });
@@ -88,14 +102,15 @@ const EXPECTED_READ_ONLY_TOOLS = [
 
 const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
 const waitFor = async (predicate, what) => {
-  const deadline = Date.now() + 5_000;
-  while (!predicate() && child.exitCode === null) {
-    if (Date.now() >= deadline) {
-      child.kill();
-      throw new Error(`installed-bin ${what} timed out; stderr=${stderr}`);
-    }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
-  }
+  const scope = createWaitScope({ timeoutMs: 5_000, parent: operationScope });
+  try {
+    await within(scope, async () => {
+      while (!predicate() && child.exitCode === null) await sleep(scope, 20);
+    });
+  } catch {
+    stopChild(child);
+    throw new Error(`installed-bin ${what} timed out; stderr=${stderr}`);
+  } finally { scope.dispose(); }
 };
 
 await waitFor(() => stdout.includes('"result"'), "handshake");
@@ -104,7 +119,11 @@ send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
 await waitFor(() => stdout.includes('"tools"'), "tools/list");
 
 child.stdin.end();
-const exitCode = await closed;
+const closeScope = createWaitScope({ timeoutMs: 5_000, parent: operationScope });
+let exitCode;
+try { exitCode = await within(closeScope, () => closed); }
+catch (error) { stopChild(child); throw error; }
+finally { closeScope.dispose(); }
 if (exitCode !== 0 || !stdout.includes('"name":"cursor-mcp"')) {
   throw new Error(
     `installed-bin handshake failed (exit ${exitCode}); stdout=${stdout}; stderr=${stderr}`,
@@ -132,10 +151,27 @@ if (
     `installed-bin handshake reported version ${JSON.stringify(reported)}; expected ${packageVersion}+unknown or ${packageVersion}+g<sha12>`,
   );
 }
-const versionRun = spawnSync(process.execPath, [binPath, "--version"], {
-  env: { PATH: process.env.PATH },
-  encoding: "utf8",
-});
+const versionScope = createWaitScope({ timeoutMs: 5_000, parent: operationScope });
+let versionChild;
+let versionRun;
+try {
+  versionRun = await within(versionScope, () => new Promise((resolveVersion, rejectVersion) => {
+    versionChild = spawn(process.execPath, [binPath, "--version"], {
+      env: { PATH: process.env.PATH }, stdio: ["ignore", "pipe", "pipe"],
+    });
+    let versionStdout = "";
+    let versionStderr = "";
+    versionChild.stdout.on("error", () => {});
+    versionChild.stderr.on("error", () => {});
+    versionChild.stdout.on("data", chunk => { versionStdout += chunk.toString(); });
+    versionChild.stderr.on("data", chunk => { versionStderr += chunk.toString(); });
+    versionChild.once("error", rejectVersion);
+    versionChild.once("close", status => resolveVersion({ status, stdout: versionStdout, stderr: versionStderr }));
+  }));
+} catch (error) {
+  if (versionChild) stopChild(versionChild);
+  throw error;
+} finally { versionScope.dispose(); }
 if (versionRun.status !== 0 || versionRun.stdout !== `${reported}\n`) {
   throw new Error(
     `installed-bin --version disagreed with the handshake (exit ${versionRun.status}); stdout=${versionRun.stdout}; stderr=${versionRun.stderr}`,
@@ -150,3 +186,5 @@ if (missing.length > 0 || extra.length > 0) {
   );
 }
 console.log(`check:bin OK -- ${reported}; ${names.length} read-only tools through the symlink`);
+
+operationScope.dispose();

@@ -21,6 +21,7 @@
 
 import { link, mkdir, open, realpath, stat, unlink, type FileHandle } from "node:fs/promises";
 import { basename, join, resolve, sep } from "node:path";
+import { WaitStoppedError } from "./wait.js";
 import { PolicyError } from "./errors.js";
 
 /**
@@ -106,9 +107,12 @@ export function exportPaths(root: string, agentId: string, runId: string): Expor
  * other left behind. A pre-existing published export is refused first, so the
  * message names the finished artifact rather than the temporary one.
  */
-export async function openPartial(paths: ExportPaths): Promise<FileHandle> {
+export async function openPartial(paths: ExportPaths, stop?: () => string | undefined): Promise<FileHandle> {
+  checkStop(stop);
   await mkdir(paths.dir, { recursive: true });
-  await assertResolvedDir(paths);
+  checkStop(stop);
+  await assertResolvedDir(paths, stop);
+  checkStop(stop);
   try {
     return await open(paths.partial, "wx");
   } catch (error) {
@@ -134,8 +138,9 @@ export async function openPartial(paths: ExportPaths): Promise<FileHandle> {
  * another directory inside the root, while a symlinked *root* stays fine because
  * both sides resolve through it.
  */
-async function assertResolvedDir(paths: ExportPaths): Promise<void> {
+async function assertResolvedDir(paths: ExportPaths, stop?: () => string | undefined): Promise<void> {
   const realRoot = await realpath(paths.root);
+  checkStop(stop);
   const realDir = await realpath(paths.dir);
   const prefix = realRoot.endsWith(sep) ? realRoot : `${realRoot}${sep}`;
   if (!realDir.startsWith(prefix) || realDir !== join(realRoot, basename(paths.dir))) {
@@ -165,9 +170,11 @@ export async function writeFully(
   handle: FileHandle,
   data: Uint8Array,
   onProgress?: (bytes: number) => void,
+  stop?: () => string | undefined,
 ): Promise<number> {
   let offset = 0;
   while (offset < data.byteLength) {
+    checkStop(stop);
     const { bytesWritten } = await handle.write(data, offset, data.byteLength - offset);
     if (bytesWritten > 0) {
       offset += bytesWritten;
@@ -211,6 +218,7 @@ export interface Publication {
   /** Why the partial is still there, when it is. Ours, never upstream text. */
   detail?: string;
 }
+export interface PublicationFact { linked: boolean; partialRemoved?: boolean }
 
 /**
  * Publish a completed partial under its final name.
@@ -225,7 +233,8 @@ export interface Publication {
  * comes back as `partialRemoved: false` -- a leftover duplicate to clean up, not
  * a lost capture.
  */
-export async function publish(partial: string, final: string): Promise<Publication> {
+export async function publish(partial: string, final: string, stop?: () => string | undefined, onFact?: (fact: PublicationFact) => void): Promise<Publication> {
+  if (stop?.() !== undefined) return { linked: false, partialRemoved: false, detail: "publication observation stopped" };
   try {
     await link(partial, final);
   } catch (error) {
@@ -237,9 +246,15 @@ export async function publish(partial: string, final: string): Promise<Publicati
     }
     throw error;
   }
+  onFact?.({ linked: true });
+  if (stop?.() !== undefined) {
+    onFact?.({ linked: true, partialRemoved: false });
+    return { linked: true, partialRemoved: false, detail: "publication cleanup observation stopped" };
+  }
   try {
     await unlink(partial);
   } catch (error) {
+    onFact?.({ linked: true, partialRemoved: false });
     return {
       linked: true,
       partialRemoved: false,
@@ -248,11 +263,12 @@ export async function publish(partial: string, final: string): Promise<Publicati
       })`,
     };
   }
+  onFact?.({ linked: true, partialRemoved: true });
   return { linked: true, partialRemoved: true };
 }
 
-export async function publishRaw(paths: ExportPaths): Promise<Publication> {
-  return publish(paths.partial, paths.raw);
+export async function publishRaw(paths: ExportPaths, stop?: () => string | undefined, onFact?: (fact: PublicationFact) => void): Promise<Publication> {
+  return publish(paths.partial, paths.raw, stop, onFact);
 }
 
 /**
@@ -277,8 +293,10 @@ export async function writeSidecar(
   path: string,
   content: string,
   stop?: () => string | undefined,
+  onFact?: (fact: PublicationFact) => void,
 ): Promise<Publication> {
   const partial = `${path}.partial`;
+  if (stop?.() !== undefined) return { linked: false, partialRemoved: false, detail: "sidecar observation stopped" };
   const handle = await open(partial, "wx").catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
       throw new PolicyError(
@@ -289,7 +307,7 @@ export async function writeSidecar(
     throw error;
   });
   try {
-    await writeFully(handle, Buffer.from(content, "utf8"));
+    await writeFully(handle, Buffer.from(content, "utf8"), undefined, stop);
     // Before publication, not after: buffered bytes that never reached the file
     // must not be linked under a name that says they did.
     await handle.close();
@@ -311,7 +329,7 @@ export async function writeSidecar(
         `could be linked${removed ? "" : `, and ${basename(partial)} is still there`}`,
     };
   }
-  return publish(partial, path);
+  return publish(partial, path, stop, onFact);
 }
 
 /**
@@ -334,4 +352,9 @@ export async function discardEmptyPartial(paths: ExportPaths): Promise<boolean> 
     () => true,
     () => false,
   );
+}
+
+function checkStop(stop?: () => string | undefined): void {
+  const reason = stop?.();
+  if (reason !== undefined) throw new WaitStoppedError(reason === "time-limit" ? "deadline" : "caller_cancelled");
 }

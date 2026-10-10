@@ -12,6 +12,8 @@
  *   - file invalid -> refuse to start
  */
 
+import { requestScope } from "./request-context.js";
+import { within } from "./wait.js";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -309,8 +311,9 @@ export async function loadPolicy(
   const mustExist =
     requireFile ?? (path === undefined && configuredPath !== undefined);
   let raw: string;
+  const scope = requestScope(10_000);
   try {
-    raw = await readFile(resolvedPath, "utf8");
+    raw = await within(scope, () => readFile(resolvedPath, "utf8"));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       if (mustExist) {
@@ -322,7 +325,7 @@ export async function loadPolicy(
       return READ_ONLY_POLICY;
     }
     throw new ConfigError(`cannot read policy file ${resolvedPath}`);
-  }
+  } finally { scope.dispose(); }
 
   let parsed: unknown;
   try {

@@ -24,6 +24,8 @@
  * requirement: the published schema types `install` and `start` as plain strings.
  */
 
+import { requestScope } from "./request-context.js";
+import { within, type WaitScope } from "./wait.js";
 import { createHash } from "node:crypto";
 import { open, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -1093,12 +1095,19 @@ const NUL = String.fromCharCode(0);
  * because a repository definition wins over a saved environment.
  */
 export async function readLocalDefinition(repoRoot: string): Promise<LocalDefinition> {
+  const scope = requestScope(10_000);
+  try { return await within(scope, () => readLocalDefinitionWithin(repoRoot, scope)); }
+  finally { scope.dispose(); }
+}
+
+async function readLocalDefinitionWithin(repoRoot: string, scope: WaitScope): Promise<LocalDefinition> {
   if (repoRoot.includes(NUL)) {
     throw new Error("repoRoot contains a NUL byte");
   }
   const root = resolve(repoRoot);
   const path = join(root, DEFINITION_PATH);
   try {
+    scope.throwIfStopped();
     const [resolvedRoot, resolvedFile] = await Promise.all([
       realpath(root),
       realpath(path),
@@ -1108,8 +1117,10 @@ export async function readLocalDefinition(repoRoot: string): Promise<LocalDefini
       throw new Error(`${DEFINITION_PATH} resolves outside the repository root`);
     }
 
+    scope.throwIfStopped();
     const handle = await open(resolvedFile, "r");
     try {
+      scope.throwIfStopped();
       const stat = await handle.stat();
       if (stat.size > MAX_DEFINITION_BYTES) {
         return {
@@ -1124,6 +1135,7 @@ export async function readLocalDefinition(repoRoot: string): Promise<LocalDefini
       const buffer = Buffer.alloc(MAX_DEFINITION_BYTES + 1);
       let bytesRead = 0;
       while (bytesRead < buffer.length) {
+        scope.throwIfStopped();
         const chunk = await handle.read(
           buffer,
           bytesRead,

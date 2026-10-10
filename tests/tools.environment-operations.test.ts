@@ -118,7 +118,8 @@ async function invoke(
   cliRunner?: CliRunner,
 ) {
   const client = await connect(p, runner, cliRunner);
-  const result = await client.callTool({ name, arguments: args });
+  const delegated = ["cursor_inspect_environment", "cursor_get_build_logs", "cursor_trigger_build", "cursor_qualify_environment"].includes(name);
+  const result = await client.callTool({ name, arguments: { ...(delegated ? { waitMs: 1 } : {}), ...args } });
   return {
     isError: result.isError === true,
     structured: (result.structuredContent ?? {}) as Record<string, unknown>,
@@ -275,6 +276,18 @@ describe("cursor_list_owner_actions", () => {
 });
 
 describe("delegation lifecycle", () => {
+  it("returns a fresh zero-wait handle without reading or inventing a run status, then observes on resume", async () => {
+    const { runner, starts, collected } = fake((handle) => ({ state: "pending", handle, runStatus: "RUNNING" }));
+    const first = await invoke(WRITE, runner, "cursor_inspect_environment", { environment: ENV_NAME, waitMs: 0 });
+    expect(collected).toEqual([]);
+    expect(first.structured.delegation).not.toHaveProperty("runStatus");
+    const second = await invoke(WRITE, runner, "cursor_inspect_environment", {
+      environment: ENV_NAME, waitMs: 0, resume: first.structured.resume,
+    });
+    expect(second.structured.status).toBe("DELEGATION_PENDING");
+    expect(starts).toHaveLength(1);
+    expect(collected).toHaveLength(1);
+  });
   it("returns a resume handle rather than holding the call open", async () => {
     const { runner, starts } = fake((handle) => ({
       state: "pending",

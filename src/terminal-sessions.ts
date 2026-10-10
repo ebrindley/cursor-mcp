@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { MAX_OUTPUT_CODE_POINTS } from './terminal-output.js';
 import { StringDecoder } from 'node:string_decoder';
+import { createWaitScope, within, WaitStoppedError } from './wait.js';
+import { independently, requestScope, withWaitScope } from './request-context.js';
 import { object, TerminalFailure, type TerminalConnector, type TerminalPeer, failureFields } from './terminal-gateway.js';
 
 type Delivery = 'not_submitted' | 'submitted' | 'unknown';
@@ -18,7 +20,7 @@ type Session = {
 const sequenceValid = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 1 && (n as number) < Number.MAX_SAFE_INTEGER;
 const dimensionsValid = (cols: unknown, rows: unknown) => Number.isInteger(cols) && Number.isInteger(rows) &&
   (cols as number) >= 2 && (cols as number) <= 500 && (rows as number) >= 2 && (rows as number) <= 300;
-const code = (error: unknown) => error instanceof TerminalFailure ? error.code : 'terminal_unavailable';
+const code = (error: unknown) => error instanceof WaitStoppedError ? (error.reason === 'deadline' ? 'deadline' : 'request_cancelled') : error instanceof TerminalFailure ? error.code : 'terminal_unavailable';
 const MAX_INPUT_BYTES = 16384;
 
 /** Owned shells only. Sequence high-water marks reject retired requests without an unbounded journal. */
@@ -64,37 +66,45 @@ export class TerminalSessions {
     if (op.peer) return op.peer;
     if (op.connecting) return op.connecting;
     if (!op.ptyId || ['exited', 'lost', 'closing', 'unknown'].includes(op.state)) throw new TerminalFailure('session_not_attachable');
-    op.connecting = (async () => {
-      const peer = initialPeer ?? (await this.connector.connect(op.machineId)).peer;
-      if (this.closed || op.state === 'closing') { peer.close(); throw new TerminalFailure('terminal_closed'); }
-      op.peer = peer; op.abort = new AbortController(); op.state = 'attaching';
-      const disconnected = (reason: string) => {
-        if (op.peer !== peer) return;
-        this.detach(op); op.state = 'detached'; op.reason = reason; op.reconnectGapPossible = true; this.notify(op);
-      };
-      void peer.stream('AttachPty', { ptyId: op.ptyId, ...(op.lastEventId ? { lastEventId: op.lastEventId } : {}) }, event => {
-        if (op.peer !== peer) return;
-        if (typeof event.eventId !== 'string' || !event.eventId) throw new Error('missing_event_cursor');
-        if (op.seen.has(event.eventId)) return;
-        if (event.ptyData !== undefined) {
-          if (!object(event.ptyData)) throw new Error('invalid_pty_data');
-          const data = event.ptyData.data ?? '';
-          if (typeof data !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) throw new Error('invalid_pty_data');
-          this.append(op, op.decoder.write(Buffer.from(data, 'base64')));
-        } else if (event.ptyExited !== undefined) {
-          if (!object(event.ptyExited)) throw new Error('invalid_pty_exit');
-          const exitCode = event.ptyExited.exitCode ?? 0, signal = event.ptyExited.signal ?? 0;
-          if (!Number.isInteger(exitCode) || !Number.isInteger(signal) || (signal as number) < 0) throw new Error('invalid_pty_exit');
-          this.append(op, op.decoder.end()); op.signal = (signal as number) || null; op.exitCode = signal ? null : exitCode as number;
-          op.state = 'exited'; op.reason = signal ? 'signaled' : 'completed'; op.cleanup = 'process_exited';
-        }
-        op.lastEventId = event.eventId; op.seen.add(event.eventId);
-        if (op.seen.size > 256) op.seen.delete(op.seen.values().next().value!);
-        if (op.state === 'exited') this.detach(op); else { op.state = 'attached'; op.reason = null; }
-        this.notify(op);
-      }, op.abort.signal).then(() => disconnected('stream_ended_without_exit')).catch(error => disconnected(code(error)));
-      return peer;
-    })().catch(error => {
+    op.connecting = independently(async () => {
+      const scope = createWaitScope({ timeoutMs: 30000 });
+      try {
+        return await withWaitScope(scope, async () => {
+          const peer = initialPeer ?? (await within(scope, () => this.connector.connect(op.machineId, scope.signal).then(connection => {
+            if (scope.stopReason() || this.closed) connection.peer.close();
+            return connection;
+          }))).peer;
+          if (this.closed || op.state === 'closing') { peer.close(); throw new TerminalFailure('terminal_closed'); }
+          op.peer = peer; op.abort = new AbortController(); op.state = 'attaching';
+          const disconnected = (reason: string) => {
+            if (op.peer !== peer) return;
+            this.detach(op); op.state = 'detached'; op.reason = reason; op.reconnectGapPossible = true; this.notify(op);
+          };
+          void peer.stream('AttachPty', { ptyId: op.ptyId, ...(op.lastEventId ? { lastEventId: op.lastEventId } : {}) }, event => {
+            if (op.peer !== peer) return;
+            if (typeof event.eventId !== 'string' || !event.eventId) throw new Error('missing_event_cursor');
+            if (op.seen.has(event.eventId)) return;
+            if (event.ptyData !== undefined) {
+              if (!object(event.ptyData)) throw new Error('invalid_pty_data');
+              const data = event.ptyData.data ?? '';
+              if (typeof data !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) throw new Error('invalid_pty_data');
+              this.append(op, op.decoder.write(Buffer.from(data, 'base64')));
+            } else if (event.ptyExited !== undefined) {
+              if (!object(event.ptyExited)) throw new Error('invalid_pty_exit');
+              const exitCode = event.ptyExited.exitCode ?? 0, signal = event.ptyExited.signal ?? 0;
+              if (!Number.isInteger(exitCode) || !Number.isInteger(signal) || (signal as number) < 0) throw new Error('invalid_pty_exit');
+              this.append(op, op.decoder.end()); op.signal = (signal as number) || null; op.exitCode = signal ? null : exitCode as number;
+              op.state = 'exited'; op.reason = signal ? 'signaled' : 'completed'; op.cleanup = 'process_exited';
+            }
+            op.lastEventId = event.eventId; op.seen.add(event.eventId);
+            if (op.seen.size > 256) op.seen.delete(op.seen.values().next().value!);
+            if (op.state === 'exited') this.detach(op); else { op.state = 'attached'; op.reason = null; }
+            this.notify(op);
+          }, op.abort.signal).then(() => disconnected('stream_ended_without_exit')).catch(error => disconnected(code(error)));
+          return peer;
+        });
+      } finally { scope.dispose(); }
+    }).catch(error => {
       op.reason = code(error); if (op.reason === 'machine_changed') op.state = 'lost';
       throw error;
     }).finally(() => { delete op.connecting; });
@@ -102,13 +112,26 @@ export class TerminalSessions {
   }
 
   async handle(request: SessionRequest, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const scope = requestScope(45000);
+    const cancel = () => scope.stop('caller_cancelled');
+    if (signal?.aborted) cancel(); else signal?.addEventListener('abort', cancel, { once: true });
+    try { return await withWaitScope(scope, () => within(scope, () => this.dispatch(request, scope.signal))); }
+    catch (error) {
+      if (!(error instanceof WaitStoppedError)) throw error;
+      const op = this.sessions.get(request.terminalId ?? (request.operation === 'create' ? this.lastCreate?.terminalId : '') ?? '');
+      return { ...(op ? this.snapshot(op) : {}), status: error.reason === 'deadline' ? 'deadline' : 'request_cancelled',
+        ...(request.operation === 'input' ? { inputOutcome: op?.lastInput?.outcome ?? 'not_submitted' } : {}) };
+    } finally { scope.dispose(); signal?.removeEventListener('abort', cancel); }
+  }
+
+  private async dispatch(request: SessionRequest, signal?: AbortSignal): Promise<Record<string, unknown>> {
     if (signal?.aborted) return { status: 'request_cancelled' };
     if (request.operation === 'list') return { status: this.closed ? 'closed' : 'ready', sessionId: this.sessionId,
       nextCreateSequence: this.nextCreateSequence, maxSessions: this.maxSessions,
       terminals: [...this.sessions.values()].map(op => ({ terminalId: op.terminalId, state: op.state })) };
     if (request.sessionId !== this.sessionId) return { status: 'session_mismatch', sessionId: this.sessionId };
     if (this.closed) return { status: 'closed' };
-    if (request.operation === 'create') return this.create(request);
+    if (request.operation === 'create') return independently(() => this.create(request));
     const op = this.sessions.get(request.terminalId ?? '');
     if (!op) return { status: 'not_retained' };
     if (request.operation === 'read' || request.operation === 'attach') {
@@ -116,12 +139,13 @@ export class TerminalSessions {
       if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > MAX_OUTPUT_CODE_POINTS ||
         !Number.isInteger(wait) || wait < 0 || wait > 10000) return { status: 'invalid_request' };
       if (op.state === 'detached') { try { await this.attach(op); } catch { /* Reason is retained by attach. */ } }
+      // Attachment has a separate allowance; zero wait is an immediate output snapshot.
       if (wait && offset >= op.end && ['attached', 'attaching'].includes(op.state)) {
-        await new Promise<void>(resolve => {
-          const done = () => { clearTimeout(timer); op.wake.delete(done); signal?.removeEventListener('abort', done); resolve(); };
-          const timer = setTimeout(done, wait); op.wake.add(done); signal?.addEventListener('abort', done, { once: true });
-          if (signal?.aborted || this.closed) done();
-        });
+        const observation = requestScope(wait);
+        let done: (() => void) | undefined;
+        try { await within(observation, () => new Promise<void>(resolve => { done = resolve; op.wake.add(done); if (this.closed) resolve(); })); }
+        catch (error) { if (!(error instanceof WaitStoppedError)) throw error; }
+        finally { observation.dispose(); if (done) op.wake.delete(done); }
       }
       return this.snapshot(op, offset, limit);
     }
@@ -131,7 +155,7 @@ export class TerminalSessions {
         this.detach(op); this.sessions.delete(op.terminalId); this.notify(op);
         return { status: 'released', cleanup: op.cleanup, remoteOutcome: 'unknown' };
       }
-      return this.terminate(op);
+      return independently(() => this.terminate(op));
     }
     if (request.operation !== 'input' && request.operation !== 'resize') return { status: 'invalid_request' };
     if (request.operation === 'input') {
@@ -152,24 +176,33 @@ export class TerminalSessions {
     if (['exited', 'lost', 'unknown', 'closing', 'starting'].includes(op.state)) return { status: 'session_not_writable', inputOutcome: 'not_submitted' };
     op.busy = true;
     const input = request.operation === 'input' ? { sequence: request.sequence!, digest: createHash('sha256').update(request.data!).digest('hex'), outcome: 'not_submitted' as Delivery } : undefined;
-    if (input) { op.lastInput = input; op.nextInputSequence++; }
-    let peer: TerminalPeer | undefined;
-    try {
-      peer = await this.attach(op);
-      const response = await peer.unary(input ? 'SendInput' : 'ResizePty', input
-        ? { ptyId: op.ptyId, data: Buffer.from(request.data!).toString('base64') }
-        : { ptyId: op.ptyId, cols: request.cols, rows: request.rows }, () => { if (input) input.outcome = 'unknown'; });
+    const acknowledgeInput = (response: Record<string, unknown>) => {
       if (input) input.outcome = response.success === true ? 'submitted' : 'unknown';
-      return { status: input ? 'input_result' : response.success === true ? 'resized' : 'resize_unconfirmed',
-        ...(input ? { inputOutcome: input.outcome, nextInputSequence: op.nextInputSequence } : {}) };
-    } catch (error) {
-      if (input && error instanceof TerminalFailure && error.submitted) input.outcome = 'unknown';
-      if (code(error) === 'terminal_rpc_timeout' && peer && op.peer === peer) {
-        this.detach(op); op.state = 'detached'; op.reason = 'terminal_rpc_timeout';
-        op.reconnectGapPossible = true; this.notify(op);
-      }
-      return { status: code(error), ...failureFields(error), ...(input ? { inputOutcome: input.outcome, nextInputSequence: op.nextInputSequence } : {}) };
-    } finally { op.busy = false; }
+    };
+    if (input) { op.lastInput = input; op.nextInputSequence++; }
+    return independently(async () => {
+      const owner = createWaitScope({ timeoutMs: 30000 });
+      let peer: TerminalPeer | undefined;
+      try {
+        peer = await within(owner, () => this.attach(op));
+        const response = await withWaitScope(owner, () => within(owner, () => peer!.unary(input ? 'SendInput' : 'ResizePty', input
+          ? { ptyId: op.ptyId, data: Buffer.from(request.data!).toString('base64') }
+          : { ptyId: op.ptyId, cols: request.cols, rows: request.rows }, () => { if (input) input.outcome = 'unknown'; }, acknowledgeInput).then(response => {
+          acknowledgeInput(response);
+          return response;
+        })));
+        if (input) input.outcome = response.success === true ? 'submitted' : 'unknown';
+        return { status: input ? 'input_result' : response.success === true ? 'resized' : 'resize_unconfirmed',
+          ...(input ? { inputOutcome: input.outcome, nextInputSequence: op.nextInputSequence } : {}) };
+      } catch (error) {
+        if (input && error instanceof TerminalFailure && error.submitted) input.outcome = 'unknown';
+        if (['terminal_rpc_timeout', 'deadline'].includes(code(error)) && peer && op.peer === peer) {
+          this.detach(op); op.state = 'detached'; op.reason = 'terminal_rpc_timeout';
+          op.reconnectGapPossible = true; this.notify(op);
+        }
+        return { status: code(error), ...failureFields(error), ...(input ? { inputOutcome: input.outcome, nextInputSequence: op.nextInputSequence } : {}) };
+      } finally { owner.dispose(); op.busy = false; }
+    });
   }
 
   private async create(request: SessionRequest): Promise<Record<string, unknown>> {
@@ -185,26 +218,48 @@ export class TerminalSessions {
     if (this.creating) return { status: 'busy' };
     if (this.sessions.size >= this.maxSessions) return { status: 'session_capacity' };
     this.creating = true;
+    const owner = createWaitScope({ timeoutMs: 30000 });
     const op: Session = { terminalId: randomUUID(), state: 'starting', reason: null, cleanup: 'pending', creationOutcome: 'not_submitted',
       exitCode: null, signal: null, output: '', start: 0, end: 0, decoder: new StringDecoder('utf8'), seen: new Set(),
       reconnectGapPossible: false, nextInputSequence: 1, busy: false, wake: new Set() };
     this.sessions.set(op.terminalId, op); this.lastCreate = { sequence: request.sequence, digest, terminalId: op.terminalId }; this.nextCreateSequence++;
+    const acknowledgeSpawn = (value: Record<string, unknown>) => {
+      if (typeof value.ptyId === 'string' && value.ptyId) {
+        op.ptyId = value.ptyId; op.creationOutcome = 'submitted'; op.state = 'detached';
+        if (op.cleanup === 'identity_unknown') op.cleanup = 'pending';
+      }
+    };
     try {
-      const connection = await this.connector.connect(); op.machineId = connection.machineId;
+      const connection = await withWaitScope(owner, () => within(owner, () => this.connector.connect(undefined, owner.signal).then(connection => {
+        if (owner.stopReason() || this.closed) connection.peer.close();
+        return connection;
+      }))); op.machineId = connection.machineId;
       try {
         if (this.closed) throw new TerminalFailure('terminal_closed');
-        const response = await connection.peer.unary('SpawnPty', { process: { shell: '/bin/bash', args: ['--noprofile', '--norc', '-i'] },
-          cwd: '/tmp', env: { BASH_ENV: '/dev/null', TERM: 'dumb', PS1: 'MCP> ', PROMPT_COMMAND: '' }, cols, rows }, () => { op.creationOutcome = 'unknown'; });
+        const response = await withWaitScope(owner, () => within(owner, () => connection.peer.unary('SpawnPty', { process: { shell: '/bin/bash', args: ['--noprofile', '--norc', '-i'] },
+          cwd: '/tmp', env: { BASH_ENV: '/dev/null', TERM: 'dumb', PS1: 'MCP> ', PROMPT_COMMAND: '' }, cols, rows }, () => { op.creationOutcome = 'unknown'; }, acknowledgeSpawn).then(value => {
+          acknowledgeSpawn(value);
+          return value;
+        })));
         if (typeof response.ptyId !== 'string' || !response.ptyId) throw new TerminalFailure('spawn_identity_missing', true);
         op.ptyId = response.ptyId; op.creationOutcome = 'submitted'; op.state = 'detached';
-        await this.attach(op, connection.peer);
-      } finally { if (op.peer !== connection.peer) connection.peer.close(); }
+        await within(owner, () => this.attach(op, connection.peer));
+      } finally {
+        if (op.peer !== connection.peer) {
+          if (connection.peer.settleAccepted && !this.closed) {
+            const settlement = createWaitScope({ timeoutMs: 10000 });
+            try { await within(settlement, () => connection.peer.settleAccepted!()); } catch { /* No retry or deadline extension. */ }
+            finally { settlement.dispose(); }
+          }
+          connection.peer.close();
+        }
+      }
     } catch (error) {
       op.reason = code(error);
       Object.assign(op, failureFields(error));
       if (error instanceof TerminalFailure && error.submitted && !op.ptyId) op.creationOutcome = 'unknown';
       if (!op.ptyId) { op.state = 'unknown'; op.cleanup = op.creationOutcome === 'not_submitted' ? 'not_created' : 'identity_unknown'; }
-    } finally { this.creating = false; }
+    } finally { owner.dispose(); this.creating = false; }
     return this.snapshot(op);
   }
   private async terminate(op: Session): Promise<Record<string, unknown>> {
@@ -213,11 +268,15 @@ export class TerminalSessions {
     if (op.state === 'exited' || !op.ptyId) { this.sessions.delete(op.terminalId); return { status: 'closed', cleanup: op.cleanup }; }
     if (op.state === 'lost') return this.snapshot(op);
     op.state = 'closing'; this.detach(op); this.notify(op);
+    const owner = createWaitScope({ timeoutMs: 30000 });
     let peer: TerminalPeer | undefined;
     try {
-      ({ peer } = await this.connector.connect(op.machineId));
-      try { await peer.unary('TerminatePty', { ptyId: op.ptyId }); } catch { /* Verify an uncertain reply without resending input. */ }
-      const response = await peer.unary('ListPtys', {});
+      ({ peer } = await withWaitScope(owner, () => within(owner, () => this.connector.connect(op.machineId, owner.signal).then(connection => {
+        if (owner.stopReason()) connection.peer.close();
+        return connection;
+      }))));
+      try { await withWaitScope(owner, () => within(owner, () => peer!.unary('TerminatePty', { ptyId: op.ptyId }))); } catch { /* Verify an uncertain reply without resending input. */ }
+      const response = await withWaitScope(owner, () => within(owner, () => peer!.unary('ListPtys', {})));
       if (response.ptys !== undefined && !Array.isArray(response.ptys)) throw new TerminalFailure('invalid_gateway_response');
       if ((response.ptys as unknown[] | undefined ?? []).some(value => object(value) && value.ptyId === op.ptyId)) throw new TerminalFailure('termination_unconfirmed');
       this.sessions.delete(op.terminalId); return { status: 'closed', cleanup: 'process_not_listed' };
@@ -226,7 +285,7 @@ export class TerminalSessions {
       op.state = op.reason === 'machine_changed' ? 'lost' : 'detached';
       if (op.state === 'detached') op.reconnectGapPossible = true;
       return this.snapshot(op);
-    } finally { peer?.close(); }
+    } finally { owner.dispose(); peer?.close(); }
   }
   close() { this.closed = true; for (const op of this.sessions.values()) { this.detach(op); this.notify(op); } }
 }
