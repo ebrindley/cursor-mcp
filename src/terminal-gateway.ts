@@ -245,7 +245,7 @@ export class CursorTerminalConnector implements TerminalConnector {
           headers: { 'content-type': 'application/json', 'connect-protocol-version': '1', 'x-cursor-client-type': 'cli', authorization: `Bearer ${token}` },
           body: JSON.stringify(input), signal: scope.signal });
         if (response.status === 401 || response.status === 403) {
-          this.token = undefined;
+          if (this.token === token) this.token = undefined;
           throw new TerminalFailure(response.status === 401 ? 'terminal_authentication_expired' : 'terminal_permission_denied', false,
             { httpStatus: response.status, operation });
         }

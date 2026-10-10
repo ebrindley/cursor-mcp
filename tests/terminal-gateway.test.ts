@@ -147,6 +147,28 @@ test('cached authentication expiry refreshes once for discovery without retrying
   expect(discoveries).toBe(3); expect(calls.some(x => x.includes('SpawnPty'))).toBe(false);
 });
 
+test('a delayed old-token rejection does not erase a newer authentication token', async () => {
+  let exchanges = 0, discoveries = 0;
+  let releaseOld!: (response: Response) => void;
+  const fetcher = vi.fn(async (url: string | URL | Request) => {
+    if (String(url).endsWith('exchange_user_api_key')) {
+      return new Response(JSON.stringify({ accessToken: ++exchanges === 1 ? 'old-test-token' : 'new-test-token' }));
+    }
+    const lookup = ++discoveries;
+    if (lookup === 2) return new Promise<Response>(resolve => { releaseOld = resolve; });
+    if (lookup === 3) return new Response('{}', { status: 401 });
+    return new Response(JSON.stringify({ machine: { pod } }));
+  }) as unknown as typeof fetch;
+  const connector = new CursorTerminalConnector('test-api-key', 'bc-test', fetcher, () => new Socket() as unknown as WebSocket);
+  (await connector.connect()).peer.close();
+  const old = connector.connect();
+  await vi.waitFor(() => expect(releaseOld).toBeTypeOf('function'));
+  (await connector.connect()).peer.close();
+  releaseOld(new Response('{}', { status: 401 }));
+  (await old).peer.close();
+  expect(exchanges).toBe(2);
+});
+
  test('late close from an old socket cannot fail a request on its replacement', async () => {
   const f = fixture(); const initial = f.gateway.unary('ListPtys', {});
   const old = f.socket(); old.respond = frame => old.reply(frame.requestId); await initial;
