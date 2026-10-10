@@ -563,7 +563,10 @@ export function normalizeDefinition(
         ? null : digest(definition.chromeExecutablePath),
     },
     snapshot: snapshotAuthority(definition),
-    digest: digest(JSON.stringify(definition)),
+    digest: digest(JSON.stringify(definition, (_key, value: unknown) =>
+      isRecord(value)
+        ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]]))
+        : value)),
   };
   if (definition.name !== undefined) normalized.name = definition.name;
   if (definition.user !== undefined) normalized.user = definition.user;

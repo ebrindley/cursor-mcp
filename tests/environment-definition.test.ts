@@ -254,6 +254,14 @@ describe("path resolution", () => {
 });
 
 describe("normalized inspection", () => {
+  it("keeps nested metadata key order out of the definition digest while preserving array order", () => {
+    const left = normalizeDefinition({ ports: [{ port: 8080, metadata: { a: 1, nested: { x: 2, y: [3, 4] } } }] });
+    const right = normalizeDefinition({ ports: [{ port: 8080, metadata: { nested: { y: [3, 4], x: 2 }, a: 1 } }] });
+    const changed = normalizeDefinition({ ports: [{ port: 8080, metadata: { a: 1, nested: { x: 2, y: [4, 3] } } }] });
+    expect(left.digest).toBe(right.digest);
+    expect(left.digest).not.toBe(changed.digest);
+  });
+
   it("summarizes scripts by digest, never by text", () => {
     const normalized = normalizeDefinition(definitionOf("observed-sanitized.json"));
     expect(normalized.install?.digest).toMatch(/^sha256:[0-9a-f]{12}$/);
