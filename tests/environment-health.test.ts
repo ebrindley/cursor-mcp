@@ -346,6 +346,20 @@ describe("combined assessment", () => {
     expect(eligible.refresh.nextSteps.join(" ")).toContain("DRAFT Build");
   });
 
+  it.each(["build", "source"] as const)("withholds toolchain refresh with unknown %s evidence", (missing) => {
+    const result = assess({
+      ...(missing === "build" ? {} : { builds: healthyRows }),
+      ...(missing === "source" ? { baseline: { definitionDigest: "sha256:aaa" } } : {}),
+      toolchainObserved: [{ name: "node", version: "20.11.0" }],
+      toolchainExpectations: [{ name: "node", upstreamVersion: "22.4.0" }],
+      refreshRequested: true,
+    });
+    expect(result.state).toBe("STALE_TOOLCHAIN");
+    if (missing === "build") expect(result.build.health).toBe("UNKNOWN");
+    else expect(result.source.drift).toBe("unknown");
+    expect(result.refresh.disposition).toBe("WITHHELD");
+  });
+
   it("is STALE_SOURCE for a changed definition, and refuses to build the unsaved change", () => {
     const result = assess({
       builds: healthyRows,
