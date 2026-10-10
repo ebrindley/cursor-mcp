@@ -30,25 +30,8 @@ import { registerRunExportTool } from "./tools/run-export.js";
 import { registerTerminalTools } from "./tools/terminal.js";
 import { VERSION } from "./version.js";
 
-export async function main(): Promise<void> {
-  const apiKey = readApiKey();
-  const policy = await loadPolicy();
-  const client = new CursorClient({ apiKey });
-  const scope = new AgentScope(client, activeProfile(policy));
-
-  const server = new McpServer(
-    { name: "cursor-mcp", title: "Cursor Cloud Agents & VMs", version: VERSION },
-    {
-      instructions:
-        "This server manages Cursor Cloud Agents, their VM terminals, and associated environment/account operations. " +
-        "It is not a general local coding or research runner; honor the user's selected execution surface and established context. " +
-        "Choosing a model, repository, PR, or branch alone does not select cloud execution; local-only files and unpushed changes are not automatically transferred to a new repository-backed Cloud Agent. " +
-        "For local Cursor work, use the host's existing local Cursor agent or installed Cursor CLI, preserving the requested model; do not launch a redundant copy when already running in Cursor. " +
-        "If execution location remains ambiguous, clarify once; if the local path is unavailable, do not silently provision a cloud workspace.",
-    },
-  );
-
-  const tools = [
+export function registerTools(server: McpServer, client: CursorClient, policy: Awaited<ReturnType<typeof loadPolicy>>, scope: AgentScope, apiKey: string): string[] {
+  return [
     ...registerTerminalTools(server, policy, apiKey, undefined, scope),
     // Workspace Controls: identity, models, repositories, and the settings
     // catalog. Unproven controls stay addressable as capability results.
@@ -81,6 +64,27 @@ export async function main(): Promise<void> {
     // launches nothing, so an external scheduler can run it on a timer.
     ...registerEnvironmentHealthTools(server, client, policy, scope),
   ];
+}
+
+export async function main(): Promise<void> {
+  const apiKey = readApiKey();
+  const policy = await loadPolicy();
+  const client = new CursorClient({ apiKey });
+  const scope = new AgentScope(client, activeProfile(policy));
+
+  const server = new McpServer(
+    { name: "cursor-mcp", title: "Cursor Cloud Agents & VMs", version: VERSION },
+    {
+      instructions:
+        "This server manages Cursor Cloud Agents, their VM terminals, and associated environment/account operations. " +
+        "It is not a general local coding or research runner; honor the user's selected execution surface and established context. " +
+        "Choosing a model, repository, PR, or branch alone does not select cloud execution; local-only files and unpushed changes are not automatically transferred to a new repository-backed Cloud Agent. " +
+        "For local Cursor work, use the host's existing local Cursor agent or installed Cursor CLI, preserving the requested model; do not launch a redundant copy when already running in Cursor. " +
+        "If execution location remains ambiguous, clarify once; if the local path is unavailable, do not silently provision a cloud workspace.",
+    },
+  );
+
+  const tools = registerTools(server, client, policy, scope, apiKey);
 
   // Name the effective surface, not the configured one: a profile that permits
   // nothing produces an empty tool list, and that should be visible rather than

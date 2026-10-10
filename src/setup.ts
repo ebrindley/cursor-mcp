@@ -4,8 +4,11 @@ import { createWaitScope, within } from "./wait.js";
 import { readFile, mkdir, writeFile, access, lstat, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { dirname } from "node:path";
 import { CursorClient } from "./client.js";
+import { AgentScope } from "./agent-scope.js";
+import { registerTools } from "./server.js";
 import { activeProfile, loadPolicy, policyPath, readApiKey, PolicySchema } from "./config.js";
 import { CursorApiError } from "./errors.js";
 import { canonicalRepo, environmentBindingProblems } from "./policy.js";
@@ -156,6 +159,11 @@ async function doctorWithin(
     const loaded = await setupIo(() => loadPolicy(path, true));
     const profile = activeProfile(loaded);
     if (!profile || profile.tools.length === 0) throw new Error("no tools");
+    const probe = new McpServer({ name: "cursor-mcp-doctor", version: "offline" });
+    const localClient = new CursorClient({ apiKey: "doctor-offline", fetchImpl: async () => { throw new Error("Offline registration must not use HTTP"); } });
+    try {
+      if (registerTools(probe, localClient, loaded, new AgentScope(localClient, profile), "doctor-offline").length === 0) throw new Error("no effective tools");
+    } finally { await probe.close(); }
     for (const repo of profile.repos) if (repo !== "*") canonicalRepo(repo);
     policy = loaded;
     const allowed = (n: string) => profile.tools.includes("*") || profile.tools.includes(n);
