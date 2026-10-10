@@ -44,7 +44,8 @@ export interface SseLeftover {
   /** Output from the final decoder flush: bytes that were not a whole character. */
   decoded: string;
   /**
-   * True when any of the above is non-empty.
+   * True when any of the above is non-empty, or field lines have not yet
+   * reached their event-terminating blank line.
    *
    * This is the whole reason the leftovers are reported rather than discarded.
    * A server can send half an event and then cleanly terminate the chunked
@@ -67,6 +68,7 @@ export class SseParser {
   #line = "";
   #data = "";
   #type = "";
+  #pendingFields = false;
   #lastEventId = "";
   #ended = false;
 
@@ -111,7 +113,7 @@ export class SseParser {
         line: this.#line,
         data: this.#data,
         decoded,
-        truncated: this.#line !== "" || this.#data !== "" || decoded !== "",
+        truncated: this.#pendingFields || this.#line !== "" || this.#data !== "" || decoded !== "",
       },
     };
   }
@@ -160,6 +162,7 @@ export class SseParser {
     // A line starting with a colon is a comment. Servers use these as
     // keepalives, so they carry no fields but do prove the connection is alive.
     if (line.startsWith(":")) return undefined;
+    this.#pendingFields = true;
 
     const colon = line.indexOf(":");
     // No colon at all means a field name with an empty value, not a line to
@@ -197,6 +200,7 @@ export class SseParser {
 
   /** A blank line arrived. */
   #dispatch(): SseEvent | undefined {
+    this.#pendingFields = false;
     if (this.#data === "") {
       // An `event:` or `id:` with no `data:` dispatches nothing at all. The id
       // side effect already happened, which is why anything that waits for an
