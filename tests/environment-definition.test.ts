@@ -207,7 +207,8 @@ describe("environment contract reviewed 2026-09-07", () => {
       "array",
       "array",
     ]);
-    expect(legacy.terminals.map((terminal) => terminal.name)).toEqual(["api", "worker"]);
+    expect(legacy.terminals.map((terminal) => terminal.name?.bytes)).toEqual([3, 6]);
+    expect(legacy.terminals.every((terminal) => terminal.name?.digest.startsWith("sha256:"))).toBe(true);
 
     const current = normalizeDefinition(definitionOf("valid-commented.jsonc"));
     expect(current.terminals.map((terminal) => terminal.form)).toEqual(["object"]);
@@ -254,6 +255,19 @@ describe("path resolution", () => {
 });
 
 describe("normalized inspection", () => {
+  it("summarizes arbitrary labels and dependency strings without exposing their contents", () => {
+    const secret = "example-private-value";
+    const normalized = normalizeDefinition({
+      name: secret, user: secret,
+      repositoryDependencies: [`https://user:${secret}@example.test/repo.git`],
+      terminals: [{ command: "true", name: secret, description: secret }],
+      ports: [{ port: 8080, name: secret }],
+      mcpServerAllowlist: [{ serverUrl: "https://example.test", name: secret, toolAllowlist: [secret] }],
+    });
+    expect(JSON.stringify(normalized)).not.toContain(secret);
+    expect(normalized.repositoryDependencies[0]).toMatchObject({ digest: expect.stringMatching(/^sha256:/), bytes: expect.any(Number) });
+  });
+
   it("summarizes scripts by digest, never by text", () => {
     const normalized = normalizeDefinition(definitionOf("observed-sanitized.json"));
     expect(normalized.install?.digest).toMatch(/^sha256:[0-9a-f]{12}$/);
