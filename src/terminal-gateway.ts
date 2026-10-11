@@ -123,6 +123,7 @@ export class TerminalGateway implements TerminalPeer {
     if (streaming) { const prefix = Buffer.alloc(5); prefix.writeUInt32BE(body.length, 1); body = Buffer.concat([prefix, body]); }
     return new Promise((resolve, reject) => {
       let sent = false;
+      let queued = false;
       let settled = false;
       let status: number | undefined;
       let buffer = Buffer.alloc(0);
@@ -182,12 +183,13 @@ export class TerminalGateway implements TerminalPeer {
       else owner.dispose(); // Attachment lifetime belongs to its explicit stream signal.
       try {
         if (signal?.aborted) { abort(); return; }
-        sent = true; submitted?.();
+        sent = true;
         socket.send(JSON.stringify({ type: 1, requestId, path: `/agent.v1.PtyHostService/${method}`, method: 'POST',
           headers: { 'content-type': streaming ? 'application/connect+json' : 'application/json',
             'connect-protocol-version': '1', authorization: `Bearer ${this.pod.ptyAuthToken}` }, body: body.toString('base64') }));
+        queued = true; submitted?.();
         this.rearm(socket);
-      } catch { fail('gateway_send_failed'); }
+      } catch { sent = queued; fail('gateway_send_failed'); }
     });
   }
 

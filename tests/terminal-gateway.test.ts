@@ -32,6 +32,16 @@ function fixture(timeout = 1000, keepaliveMs = 0) { // Keepalives stay off unles
 }
 const listPtys = (socket: Socket) => socket.sent.filter(frame => frame.type === 1 && String(frame.path).endsWith('/ListPtys'));
 
+test('a synchronous send failure is not a submitted terminal RPC', async () => {
+  const f = fixture(), submitted = vi.fn();
+  const pending = f.gateway.unary('SpawnPty', {}, submitted);
+  f.socket().send = () => { throw new Error('socket not writable'); };
+  try {
+    await expect(pending).rejects.toMatchObject({ code: 'gateway_send_failed', submitted: false });
+    expect(submitted).not.toHaveBeenCalled();
+  } finally { f.gateway.close(); }
+});
+
 test('JSON unary request uses exact service route, accepts an empty default response and closes cleanly', async () => {
   const f = fixture();
   const result = f.gateway.unary('ListPtys', {});
