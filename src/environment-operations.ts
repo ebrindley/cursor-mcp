@@ -273,7 +273,7 @@ export const DelegatedReportSchema = z.looseObject({
   /** Further pages in page order, when the mission paged forward. */
   morePages: z.array(DelegatedBuildPageSchema).optional(),
   baselineBuildIds: z.array(z.string()).optional(),
-  otherActiveRuns: z.number().optional(),
+  otherActiveRuns: z.number().int().nonnegative().optional(),
   triggerDispatched: z.boolean().optional(),
   trigger: DelegatedTriggerResultSchema.optional(),
   precondition: z.string().optional(),
@@ -1073,6 +1073,7 @@ export function attributeTriggeredBuild(args: {
   }
 
   const returnedId = args.trigger?.buildId;
+  const baseline = new Set(args.baselineBuildIds ?? []);
   const draftFlags = {
     ...(args.trigger?.isDraft === undefined ? {} : { isDraft: args.trigger.isDraft }),
     ...(args.trigger?.createdDraftEnvironment === undefined
@@ -1081,6 +1082,16 @@ export function attributeTriggeredBuild(args: {
   };
 
   if (returnedId !== undefined && returnedId !== "") {
+    if (baseline.has(returnedId)) {
+      return {
+        ...base,
+        status: "ATTRIBUTION_AMBIGUOUS",
+        source: "none",
+        candidates: [returnedId],
+        reason: "The trigger returned a buildId already present in the pre-trigger baseline, so it cannot identify a newly triggered Build.",
+        nextSteps: ["Read the Build list and reconcile the returned id with the baseline before acting.", NEVER_RETRIGGER],
+      };
+    }
     return {
       ...base,
       ...draftFlags,
@@ -1097,7 +1108,6 @@ export function attributeTriggeredBuild(args: {
     };
   }
 
-  const baseline = new Set(args.baselineBuildIds ?? []);
   const candidates = (args.rows ?? [])
     .filter((row) => !baseline.has(row.buildId))
     .map((row) => row.buildId);
@@ -1105,7 +1115,7 @@ export function attributeTriggeredBuild(args: {
 
   if (
     unique.length === 1 &&
-    (args.otherActiveRuns === undefined || args.otherActiveRuns > 0)
+    args.otherActiveRuns !== 0
   ) {
     // Attribution by difference depends on this server's write being the only
     // one in the window. Another active run removes that, so the single new row
@@ -1119,8 +1129,10 @@ export function attributeTriggeredBuild(args: {
       reason:
         args.otherActiveRuns === undefined
           ? "One row was absent from the pre-trigger baseline, but the delegate did not attest whether another run was active, so that row cannot be attributed to this trigger."
-          : `One row was absent from the pre-trigger baseline, but ${args.otherActiveRuns} other run(s) ` +
-            "were active against this environment, so that row cannot be attributed to this trigger.",
+          : !Number.isInteger(args.otherActiveRuns) || args.otherActiveRuns < 0
+            ? "The active-run count is invalid, so exclusivity was not established and the new row cannot be attributed to this trigger."
+            : `One row was absent from the pre-trigger baseline, but ${args.otherActiveRuns} other run(s) ` +
+              "were active against this environment, so that row cannot be attributed to this trigger.",
       nextSteps: [
         "Identify the Build from its own identifiers before acting on it.",
         NEVER_RETRIGGER,
