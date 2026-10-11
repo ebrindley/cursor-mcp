@@ -32,11 +32,13 @@
 
 import { modelSelection } from "./model-selection.js";
 import type { CursorClient } from "./client.js";
-import { seg } from "./client.js";
+import { CursorCancelledError, seg } from "./client.js";
 import type { Profile } from "./config.js";
-import { CursorContractError, PolicyError } from "./errors.js";
+import { CursorContractError, CursorTransportError, PolicyError } from "./errors.js";
 import { REPORT_CLOSE, REPORT_OPEN, type QualificationExpectations } from "./environment-operations.js";
 import { log } from "./log.js";
+import { independently, requestScope, withWaitScope } from "./request-context.js";
+import { createWaitScope, WaitStoppedError, within, sleep as boundedSleep, delay } from "./wait.js";
 import { resolveAutoCreatePR, resolveCreateAgentLaunch, resolveModel } from "./policy.js";
 import {
   cancelRejectedRun,
@@ -104,7 +106,7 @@ export interface DelegationHandle {
 }
 
 export type DelegatedOutcome =
-  | { state: "pending"; handle: DelegationHandle; runStatus: string }
+  | { state: "pending"; handle: DelegationHandle; runStatus?: string; stopReason?: string }
   | { state: "complete"; handle: DelegationHandle; runStatus: string; text: string }
   | {
       state: "failed";
@@ -504,7 +506,7 @@ export interface DelegatedRunnerOptions {
   archiveOnFinish?: boolean;
 }
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const sleep = delay;
 
 /**
  * The one implementation, over the existing API-key client.
@@ -533,7 +535,7 @@ export class CursorDelegatedRunner implements DelegatedRunner {
     this.#scope = scope;
     this.#pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.#sleep = options.sleepImpl ?? sleep;
-    this.#now = options.nowImpl ?? Date.now;
+    this.#now = options.nowImpl ?? (() => performance.now());
     this.#archive = options.archiveOnFinish ?? true;
   }
 
@@ -556,7 +558,12 @@ export class CursorDelegatedRunner implements DelegatedRunner {
     const autoCreatePR = resolveAutoCreatePR(this.#profile, false);
     const model = resolveModel(this.#profile, undefined);
 
-    const created = await this.#client.post("/v1/agents", CreateAgentResponseSchema, {
+    const launchScope = requestScope(45_000);
+    let dispatched = false;
+    const created = await withWaitScope(launchScope, () => within(launchScope, () => {
+      launchScope.throwIfStopped();
+      dispatched = true;
+      return this.#client.post("/v1/agents", CreateAgentResponseSchema, {
       body: {
         prompt: { text: missionPrompt(request) },
         env: { type: "cloud" as const, name: launch.name },
@@ -565,6 +572,13 @@ export class CursorDelegatedRunner implements DelegatedRunner {
         ...(model === undefined ? {} : { model: modelSelection(model) }),
       },
     });
+    })).catch(error => {
+      if (!(error instanceof WaitStoppedError)) throw error;
+      const detail = error.reason === "deadline" ? "reached its deadline" : error.reason === "shutdown" ? "stopped because the server shut down" : "was cancelled by the caller";
+      const outcome = dispatched ? "the launch outcome is unknown; inspect cursor_list_agents before retrying" : "the launch was not dispatched and no agent was created";
+      const message = `Delegated launch observation ${detail}; ${outcome}.`;
+      throw error.reason === "deadline" ? new CursorTransportError(message) : new CursorCancelledError(message);
+    }).finally(() => launchScope.dispose());
 
     try {
       const reported = created.agent.env?.name?.trim();
@@ -622,16 +636,19 @@ export class CursorDelegatedRunner implements DelegatedRunner {
       agentId: checked(args.handle.agentId, ID, "agentId"),
       runId: checked(args.handle.runId, ID, "runId"),
     };
-    // A handle can come back from a caller, so it is re-checked against the
-    // policy exactly like any other agent id.
-    await this.#scope.assert(handle.agentId);
-    const deadline = this.#now() + Math.max(Math.min(args.waitMs, MAX_WAIT_MS), 0);
+    const waitMs = Math.max(Math.min(args.waitMs, MAX_WAIT_MS), 0);
+    const observation = requestScope(waitMs === 0 ? 45_000 : waitMs);
+    const deadline = this.#now() + waitMs;
     const path = `/v1/agents/${seg(handle.agentId)}/runs/${seg(handle.runId)}`;
-
+    let lastStatus: string | undefined;
+    try { return await withWaitScope(observation, async () => {
+    // Select the whole observation budget before policy lookup.
+    await within(observation, () => this.#scope.assert(handle.agentId, { signal: observation.signal }));
     for (;;) {
-      const run = await this.#client.get(path, RunSchema);
+      const run = await within(observation, () => this.#client.get(path, RunSchema, { signal: observation.signal }));
+      lastStatus = run.status;
       if (isTerminal(run.status)) {
-        await this.#archiveQuietly(handle.agentId);
+        void this.#archiveQuietly(handle.agentId);
         if (run.status !== "FINISHED") {
           return {
             state: "failed",
@@ -653,11 +670,17 @@ export class CursorDelegatedRunner implements DelegatedRunner {
       }
       // Hand back a handle rather than hold the tool call open. The Build itself
       // takes minutes, so a pending delegation is the normal case, not a fault.
-      if (this.#now() + this.#pollIntervalMs > deadline) {
+      if (waitMs === 0 || this.#now() + this.#pollIntervalMs > deadline) {
         return { state: "pending", handle, runStatus: run.status };
       }
-      await this.#sleep(this.#pollIntervalMs);
+      if (this.#sleep === sleep) await boundedSleep(observation, this.#pollIntervalMs);
+      else await within(observation, () => this.#sleep(this.#pollIntervalMs));
     }
+    }); } catch (error) {
+      if (!(error instanceof WaitStoppedError)) throw error;
+      return { state: "pending", handle, stopReason: error.reason,
+        ...(lastStatus === undefined ? {} : { runStatus: lastStatus }) };
+    } finally { observation.dispose(); }
   }
 
   /**
@@ -666,15 +689,16 @@ export class CursorDelegatedRunner implements DelegatedRunner {
    */
   async #archiveQuietly(agentId: string): Promise<void> {
     if (!this.#archive) return;
+    const cleanup = createWaitScope({ timeoutMs: 5_000 });
     try {
-      await this.#client.post(
+      await independently(() => withWaitScope(cleanup, () => within(cleanup, () => this.#client.post(
         `/v1/agents/${seg(agentId)}/archive`,
         IdResponseSchema,
-      );
+      ))));
     } catch (error) {
       log.debug(
         `could not archive delegate ${agentId}: ${error instanceof Error ? error.message : String(error)}`,
       );
-    }
+    } finally { cleanup.dispose(); }
   }
 }

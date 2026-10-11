@@ -379,6 +379,7 @@ export function registerEnvironmentHealthTools(
 
   define({
     name: "cursor_refresh_environment_toolchain",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: refresh environment toolchain",
       description:

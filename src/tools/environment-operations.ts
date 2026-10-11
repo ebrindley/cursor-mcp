@@ -378,6 +378,9 @@ export async function collectMission(args: {
     handle = binding.handle;
   }
 
+  if (args.resume === undefined && (args.waitMs ?? 0) === 0) {
+    return { kind: "pending", delegation: { ...handle } };
+  }
   const outcome = await args.runner.collect({
     handle,
     waitMs: args.waitMs ?? 0,
@@ -388,7 +391,7 @@ export async function collectMission(args: {
     runId: handle.runId,
     environment: handle.environment,
     mission: handle.mission,
-    runStatus: outcome.runStatus,
+    ...(outcome.runStatus === undefined ? {} : { runStatus: outcome.runStatus }),
   };
 
   if (outcome.state === "pending") return { kind: "pending", delegation };
@@ -627,6 +630,7 @@ export function registerEnvironmentOperationTools(
 
   define({
     name: "cursor_publish_environment",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: publish environment",
       description:
@@ -650,6 +654,7 @@ export function registerEnvironmentOperationTools(
 
   define({
     name: "cursor_delete_environment",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: delete environment",
       description:
@@ -673,6 +678,7 @@ export function registerEnvironmentOperationTools(
 
   define({
     name: "cursor_inspect_environment",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: inspect environment",
       description:
@@ -771,6 +777,7 @@ export function registerEnvironmentOperationTools(
 
   define({
     name: "cursor_get_build_logs",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: get Build logs",
       description:
@@ -861,6 +868,7 @@ export function registerEnvironmentOperationTools(
 
   define({
     name: "cursor_trigger_build",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: trigger Build",
       description:
@@ -988,6 +996,7 @@ export function registerEnvironmentOperationTools(
 
   define({
     name: OWNER_ACTIONS_TOOL,
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: list owner actions",
       description:
@@ -1052,6 +1061,7 @@ export function registerEnvironmentOperationTools(
 
   define({
     name: "cursor_save_environment",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: save environment configuration",
       description:
@@ -1242,6 +1252,7 @@ export function registerEnvironmentOperationTools(
 
   define({
     name: "cursor_qualify_environment",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: qualify environment",
       description:

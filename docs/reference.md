@@ -1,5 +1,7 @@
 # Cursor Cloud Agents & VMs: technical reference
 
+The [waiting standard](waiting.md) defines shared budgets, cancellation, and uncertain outcomes.
+
 [Installation and first task](../README.md).
 
 The display name describes the integration's domain. It does not mean every tool

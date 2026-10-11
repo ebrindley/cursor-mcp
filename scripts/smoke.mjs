@@ -23,6 +23,8 @@
  * Needs CURSOR_API_KEY and a built dist/.
  */
 
+import { requestScope, withWaitScope, currentRequestScope } from "../dist/request-context.js";
+import { within, sleep } from "../dist/wait.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
@@ -55,9 +57,15 @@ const POLL_MS = 5_000;
 let passed = 0;
 const failures = [];
 
+async function observed(ms, start) {
+  const scope = requestScope(ms);
+  try { return await withWaitScope(scope, () => within(scope, start)); }
+  finally { scope.dispose(); }
+}
+
 async function check(name, fn) {
   try {
-    const note = await fn();
+    const note = await observed(RUN_TIMEOUT_MS, fn);
     passed += 1;
     console.log(`  ok    ${name}${note ? ` -- ${note}` : ""}`);
   } catch (error) {
@@ -73,7 +81,7 @@ function assert(condition, message) {
 
 /** Call a tool and return its structured payload, failing loudly on a tool error. */
 async function call(client, name, args = {}) {
-  const result = await client.callTool({ name, arguments: args });
+  const result = await observed(45_000, () => client.callTool({ name, arguments: args }));
   const text = (result.content ?? []).map((c) => c.text ?? "").join("\n");
   assert(!result.isError, `${name} returned an error: ${text}`);
   // Every result goes through the shared envelope; if this ever stops being
@@ -84,25 +92,22 @@ async function call(client, name, args = {}) {
 
 /** Call a tool expecting failure, and return the error text. */
 async function callExpectingError(client, name, args = {}) {
-  const result = await client.callTool({ name, arguments: args });
+  const result = await observed(45_000, () => client.callTool({ name, arguments: args }));
   const text = (result.content ?? []).map((c) => c.text ?? "").join("\n");
   assert(result.isError === true, `${name} succeeded when it should have failed`);
   return text;
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 /** Poll a run until it reports terminal, or give up. */
 async function waitForTerminal(client, agentId, runId) {
-  const deadline = Date.now() + RUN_TIMEOUT_MS;
-  for (;;) {
-    const run = await call(client, "cursor_get_run", { agentId, runId });
-    if (run.terminal === true) return run;
-    if (Date.now() > deadline) {
-      throw new Error(`run ${runId} still ${run.status} after ${RUN_TIMEOUT_MS}ms`);
+  return observed(RUN_TIMEOUT_MS, async () => {
+    const scope = currentRequestScope();
+    for (;;) {
+      const run = await call(client, "cursor_get_run", { agentId, runId });
+      if (run.terminal === true) return run;
+      await sleep(scope, POLL_MS);
     }
-    await sleep(POLL_MS);
-  }
+  });
 }
 
 /**
@@ -174,9 +179,9 @@ async function writeTier(client) {
     // refuses any off-origin request so the Authorization header cannot follow
     // an API-supplied URL elsewhere. Downloading is the caller's job, which is
     // what this check stands in for.
-    const res = await fetch(minted.url);
+    const res = await observed(45_000, () => fetch(minted.url));
     assert(res.status === 200, `download returned ${res.status}`);
-    const body = await res.text();
+    const body = await observed(45_000, () => res.text());
     assert(
       body === "artifact smoke test\n",
       `unexpected contents: ${JSON.stringify(body)}`,
@@ -278,13 +283,13 @@ async function main() {
     stderr: "inherit",
   });
   const client = new Client({ name: "cursor-mcp-smoke", version: "0" });
-  await client.connect(transport);
+  await observed(45_000, () => client.connect(transport));
 
   console.log("\nregistration");
 
   let names = [];
   await check("exposes exactly the expected tools", async () => {
-    const { tools } = await client.listTools();
+    const { tools } = await observed(45_000, () => client.listTools());
     names = tools.map((t) => t.name).sort();
     const missing = EXPECTED_TOOLS.filter((t) => !names.includes(t));
     const extra = names.filter((t) => !EXPECTED_TOOLS.includes(t));
@@ -301,7 +306,7 @@ async function main() {
   });
 
   await check("gives every tool a one-line description", async () => {
-    const { tools } = await client.listTools();
+    const { tools } = await observed(45_000, () => client.listTools());
     const sprawling = tools.filter((t) => (t.description ?? "").includes("\n"));
     assert(sprawling.length === 0, `multi-line: ${sprawling.map((t) => t.name).join(", ")}`);
   });
@@ -417,20 +422,20 @@ async function main() {
   console.log("\nrefusals");
 
   await check("refuses a repo outside the policy", async () => {
-    const result = await client.callTool({
+    const result = await observed(45_000, () => client.callTool({
       name: "cursor_create_agent",
       arguments: { repo: "someone-else/private-thing", prompt: "should never run" },
-    });
+    }));
     assert(result.isError === true, "an unapproved repo was not refused");
     const text = (result.content ?? []).map((c) => c.text ?? "").join("\n");
     assert(text.includes("Refused by policy"), `unexpected refusal text: ${text}`);
   });
 
   await check("surfaces a 404 as a fenced error, not a crash", async () => {
-    const result = await client.callTool({
+    const result = await observed(45_000, () => client.callTool({
       name: "cursor_get_agent",
       arguments: { agentId: "bc-00000000-0000-0000-0000-000000000000" },
-    });
+    }));
     assert(result.isError === true, "a missing agent did not error");
     const text = (result.content ?? []).map((c) => c.text ?? "").join("\n");
     assert(text.includes("CURSOR_UNTRUSTED"), "error text was not fenced");
@@ -438,7 +443,7 @@ async function main() {
 
   if (process.argv.includes("--write")) await writeTier(client);
 
-  await client.close();
+  await observed(5_000, () => client.close());
 
   const total = passed + failures.length;
   console.log(`\n${passed}/${total} checks passed`);

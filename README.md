@@ -1,5 +1,7 @@
 # Cursor Cloud Agents & VMs
 
+See the [waiting standard](docs/waiting.md) for deadlines, cancellation, and resuming accepted work.
+
 An MCP server that lets Claude Code, Codex, and Grok launch and manage Cursor
 Cloud Agents, use their VM terminals, and manage associated environments.
 It is not a general local coding or research runner. Choose which repositories

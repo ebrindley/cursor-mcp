@@ -3,6 +3,8 @@ import { TerminalTargets } from '../src/terminal-targets.js';
 import { TerminalService } from '../src/terminal.js';
 import { TerminalSessions } from '../src/terminal-sessions.js';
 import { TerminalFailure, type TerminalConnector, type TerminalPeer } from '../src/terminal-gateway.js';
+import { createWaitScope } from '../src/wait.js';
+import { withWaitScope } from '../src/request-context.js';
 
 function fixture(maxTargets = 2) {
   const peers = new Map<string, ReturnType<typeof peerFixture>>();
@@ -140,4 +142,26 @@ test('interactive handles stay scoped and capacity is released only by explicit 
     expect(await targets.handle('a', 'session_create', { sessionId: a.sessionId, sequence: 1, cols: 80, rows: 24 })).toMatchObject({ status: 'session_mismatch' });
     expect(peers.get('a')!.calls).toEqual([]);
   } finally { targets.close(); }
+});
+
+test.each(['phases', 'parent'] as const)('wake preserves acknowledgement at a %s deadline', async mode => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+  const parent = createWaitScope({ timeoutMs: mode === 'parent' ? 45000 : 150000 });
+  let connects = 0;
+  const connector: TerminalConnector = {
+    async connect() {
+      if (++connects === 1) {
+        if (mode === 'phases') await new Promise<void>(resolve => setTimeout(resolve, 29999));
+        return { machineId: 'original', peer: { async unary() { throw new TerminalFailure('gateway_unavailable'); }, async stream() {}, close() {} } };
+      }
+      return new Promise(() => {});
+    },
+    async wake() { if (mode === 'phases') await new Promise<void>(resolve => setTimeout(resolve, 29999)); return true; },
+  };
+  const targets = new TerminalTargets(() => ({ terminal: new TerminalService('a', connector), sessions: new TerminalSessions(connector) }), 1);
+  try {
+    const pending = withWaitScope(parent, () => targets.handle('a', 'wake', { waitMs: 60000 }));
+    await vi.advanceTimersByTimeAsync(mode === 'parent' ? 45000 : 119998);
+    expect(await pending).toMatchObject({ status: 'wake', wakeOutcome: 'signaled', readiness: 'deadline', agentId: 'a' });
+  } finally { targets.close(); parent.dispose(); vi.useRealTimers(); }
 });

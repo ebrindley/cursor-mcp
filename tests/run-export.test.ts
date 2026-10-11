@@ -27,6 +27,8 @@ import {
   type ExportPaths,
 } from "../src/export-store.js";
 import { captureRunStream, MAX_TERMINAL_BYTES, terminalSidecar } from "../src/run-export.js";
+import { createWaitScope } from "../src/wait.js";
+import { withWaitScope } from "../src/request-context.js";
 import {
   ExportGate,
   registerRunExportTool,
@@ -55,6 +57,19 @@ const manifest = JSON.parse(await readFile(new URL("manifest.json", FIXTURES), "
 };
 
 const fixture = async (name: string) => readFile(new URL(name, FIXTURES));
+
+it("bounds a capture whose local write and reader cancellation ignore cancellation", async () => {
+  const observation = createWaitScope({ timeoutMs: 10 });
+  const response = new Response(new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new TextEncoder().encode("event: done\ndata: {}\n\n")); },
+    cancel() { return new Promise<void>(() => {}); },
+  }));
+  const result = await captureRunStream(response, { scope: observation, signal: observation.signal,
+    write: () => new Promise<void>(() => {}),
+  });
+  observation.dispose();
+  expect(result).toMatchObject({ complete: false, bytes: 0, stopReason: "time-limit" });
+});
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers });
@@ -102,6 +117,87 @@ function policyFor(exportRoot: string, tools = ["cursor_export_run"]): Policy {
   };
 }
 
+it.each([false, true])("retains uncertain partial facts and the slot until a late write settles (fails=%s)", async (writeFails) => {
+  const dir = await root();
+  const p = policyFor(dir);
+  const gate = new ExportGate();
+  let handler!: (args: { agentId: string; runId: string }) => Promise<{ structuredContent?: Record<string, unknown> }>;
+  const server = { registerTool(_name: unknown, _config: unknown, callback: typeof handler) { handler = callback; } } as unknown as McpServer;
+  const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(json(run))
+    .mockResolvedValueOnce(chunked("event: done\ndata: {}\n\n"));
+  const cursor = new CursorClient({ apiKey: "dummy", fetchImpl });
+  let releaseWrite!: () => void;
+  const blocked = new Promise<void>(resolve => { releaseWrite = resolve; });
+  let entered!: () => void;
+  const writing = new Promise<void>(resolve => { entered = resolve; });
+  registerRunExportTool(server, cursor, p, new AgentScope(cursor, activeProfile(p)), {
+    now: () => performance.now(), sleep: async () => {}, gate,
+    openRaw: async paths => {
+      const file = await openPartial(paths);
+      return { write: async (data: Uint8Array, offset: number, length: number) => {
+        entered(); await blocked;
+        if (writeFails) throw Object.assign(new Error("late write failed"), { code: "EIO" });
+        return file.write(data, offset, length);
+      }, close: () => file.close() } as unknown as FileHandle;
+    },
+  });
+  vi.useFakeTimers();
+  const observation = createWaitScope({ timeoutMs: 45_000 });
+  const pending = withWaitScope(observation, () => handler({ agentId: "bc-1", runId: "run-1" }));
+  await writing;
+  observation.stop("deadline");
+  await vi.advanceTimersByTimeAsync(2_000);
+  const result = await pending;
+  expect(result.structuredContent).toMatchObject({ artifactState: "unconfirmed", cleanupState: "unconfirmed",
+    candidateFiles: expect.arrayContaining(["run-1.sse.partial"]) });
+  expect(result.structuredContent).toMatchObject({ rawPublished: false });
+  expect(result.structuredContent).not.toHaveProperty("partialKept");
+  let nextEntered = false;
+  const next = gate.acquire(new AbortController().signal).then(release => { nextEntered = true; return release; });
+  await Promise.resolve(); await Promise.resolve();
+  expect(nextEntered).toBe(false);
+  releaseWrite();
+  (await next)();
+  observation.dispose();
+  expect(existsSync(join(dir, "bc-1", "run-1.sse"))).toBe(false);
+  if (writeFails) expect(existsSync(join(dir, "bc-1", "run-1.sse.partial"))).toBe(false);
+  else expect(await readFile(join(dir, "bc-1", "run-1.sse.partial"), "utf8")).toContain("done");
+});
+
+it("reports a known partial when deadline cancellation and local close settle", async () => {
+  const dir = await root();
+  const p = policyFor(dir);
+  let handler!: (args: { agentId: string; runId: string }) => Promise<{ structuredContent?: Record<string, unknown> }>;
+  const server = { registerTool(_name: unknown, _config: unknown, callback: typeof handler) { handler = callback; } } as unknown as McpServer;
+  const body = "event: assistant\ndata: working\n\n";
+  const response = new Response(new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new TextEncoder().encode(body)); },
+  }), { headers: { "content-type": "text/event-stream" } });
+  const cursor = new CursorClient({ apiKey: "dummy", fetchImpl: vi.fn<typeof fetch>()
+    .mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(json(run)).mockResolvedValueOnce(response) });
+  let wrote!: () => void;
+  const written = new Promise<void>(resolve => { wrote = resolve; });
+  registerRunExportTool(server, cursor, p, new AgentScope(cursor, activeProfile(p)), {
+    now: () => performance.now(), sleep: async () => {}, gate: new ExportGate(),
+    openRaw: async paths => {
+      const file = await openPartial(paths);
+      return { write: async (data: Uint8Array, offset: number, length: number) => {
+        const result = await file.write(data, offset, length); wrote(); return result;
+      }, close: () => file.close() } as unknown as FileHandle;
+    },
+  });
+  const observation = createWaitScope({ timeoutMs: 45_000 });
+  const pending = withWaitScope(observation, () => handler({ agentId: "bc-1", runId: "run-1" }));
+  await written;
+  observation.stop("deadline");
+  const result = await pending;
+  observation.dispose();
+  expect(result.structuredContent).toMatchObject({ complete: false, rawComplete: false, stopReason: "time-limit",
+    rawPublished: false, partialKept: true, rawFile: "run-1.sse.partial", stoppedBefore: "time-limit" });
+  expect(result.structuredContent).not.toHaveProperty("artifactState");
+  expect(await readFile(join(dir, "bc-1", "run-1.sse.partial"), "utf8")).toBe(body);
+});
+
 async function connect(
   fetchImpl: typeof fetch,
   p: Policy,
@@ -145,6 +241,7 @@ async function exportRun(
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllEnvs();
 });
 
@@ -707,7 +804,7 @@ describe("run export interruption", () => {
     // before the write could not see: neither the write nor the close is
     // interruptible, so what the probe has to stop is the link after them.
     const stop = () =>
-      statSync(`${final}.partial`).size === content.length ? "cancelled" : undefined;
+      existsSync(`${final}.partial`) && statSync(`${final}.partial`).size === content.length ? "cancelled" : undefined;
     const written = await writeSidecar(final, content, stop);
     expect(written).toMatchObject({ linked: false, partialRemoved: true });
     expect(written.detail).toContain("cancelled");
@@ -732,7 +829,6 @@ describe("run export interruption", () => {
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent).toMatchObject({
       complete: false,
-      // The raw export was published before the deadline and stays valid.
       rawComplete: true,
       rawPublished: true,
       toolsPublished: true,
@@ -742,7 +838,9 @@ describe("run export interruption", () => {
     });
     expect(result.structuredContent).not.toHaveProperty("terminalFile");
     expect(result.structuredContent).toHaveProperty("sidecarError");
-    expect((await readdir(join(dir, "bc-1"))).sort()).toEqual(["run-1.sse", "run-1.tools.json"]);
+    await vi.waitFor(async () => {
+      expect((await readdir(join(dir, "bc-1"))).sort()).toEqual(["run-1.sse", "run-1.tools.json"]);
+    });
   });
 
   it("does not open another stream when the caller cancels during a Retry-After wait", async () => {
@@ -937,8 +1035,6 @@ describe("run export sidecar failures", () => {
     expect(result.structuredContent).toMatchObject({
       complete: false,
       rawComplete: true,
-      // The raw export was published before the deadline and is still reported
-      // as published, accurately: it is whole and on disk.
       rawPublished: true,
       toolsPublished: true,
       terminalPublished: false,
@@ -948,7 +1044,9 @@ describe("run export sidecar failures", () => {
     // Nothing linked the sidecar after its write settled.
     expect(links.filter((to) => to.endsWith("run-1.terminal.md"))).toEqual([]);
     expect(links.map((to) => to.split("/").pop())).toEqual(["run-1.sse", "run-1.tools.json"]);
-    expect((await readdir(join(dir, "bc-1"))).sort()).toEqual(["run-1.sse", "run-1.tools.json"]);
+    await vi.waitFor(async () => {
+      expect((await readdir(join(dir, "bc-1"))).sort()).toEqual(["run-1.sse", "run-1.tools.json"]);
+    });
   });
 });
 

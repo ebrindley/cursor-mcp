@@ -1,7 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { setTimeout as delay } from "node:timers/promises";
-import { currentRequestSignal, seg, type CursorClient } from "../client.js";
+import { CursorCancelledError, seg, type CursorClient } from "../client.js";
+import { requestScope, withWaitScope } from "../request-context.js";
+import { within, sleep, WaitStoppedError } from "../wait.js";
 import { activeProfile, type Policy } from "../config.js";
 import { EnvironmentListSchema, readEnvironment } from "../environment-api.js";
 import { PolicyError, CursorTransportError } from "../errors.js";
@@ -88,6 +89,7 @@ export function registerBuildReadTools(server: McpServer, client: CursorClient, 
   })) names.push("cursor_list_builds");
   if (defineTool(server, policy, profile, {
     name: "cursor_get_build",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: get Build",
       description: "Read an exact Build through the public API. Optional bounded monitoring stops at terminal status; success does not imply activation.",
@@ -98,18 +100,18 @@ export function registerBuildReadTools(server: McpServer, client: CursorClient, 
       annotations: READ,
     },
     handler: async (args: TargetArgs & { buildId: string; previousStatus?: string; monitorAttempts: number; monitorIntervalSeconds: number }) => {
-      const environment = await target(args), started = performance.now();
-      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 45_000);
-      const caller = currentRequestSignal(), signal = caller ? AbortSignal.any([caller, controller.signal]) : controller.signal;
-      try {
+      const observation = requestScope(45_000), started = observation.clock.now();
+      const signal = observation.signal;
+      try { return await withWaitScope(observation, async () => {
+        const environment = await within(observation, () => target(args));
         let attempts = 0;
         let build: ReturnType<typeof view> | undefined;
         for (; attempts < args.monitorAttempts;) {
           let row: z.infer<typeof BuildSchema>;
           try {
-            row = await client.get(`/v1/environments/${seg(environment.id)}/builds/${seg(args.buildId)}`, BuildSchema, { signal });
+            row = await within(observation, () => client.get(`/v1/environments/${seg(environment.id)}/builds/${seg(args.buildId)}`, BuildSchema, { signal }));
           } catch (error) {
-            if (controller.signal.aborted && !caller?.aborted) {
+            if (error instanceof WaitStoppedError && error.reason === "deadline") {
               if (build) break;
               throw new CursorTransportError("Build read exceeded the 45000ms total deadline");
             }
@@ -118,8 +120,8 @@ export function registerBuildReadTools(server: McpServer, client: CursorClient, 
           if (row.id !== args.buildId) throw new PolicyError("Build response identifies a different Build");
           build = view(row, environment.id); attempts++;
           if (build.terminal || (args.previousStatus && isTerminalBuild(args.previousStatus)) || attempts >= args.monitorAttempts) break;
-          try { await delay(args.monitorIntervalSeconds * 1000, undefined, { signal }); }
-          catch { if (caller?.aborted) throw new Error("Build read cancelled"); break; }
+          try { await sleep(observation, args.monitorIntervalSeconds * 1000); }
+          catch (error) { if (!(error instanceof WaitStoppedError) || error.reason !== "deadline") throw error; break; }
         }
         if (!build) throw new Error("Build was not read");
         const stale = args.previousStatus !== undefined && isTerminalBuild(args.previousStatus) && args.previousStatus !== build.status;
@@ -127,9 +129,16 @@ export function registerBuildReadTools(server: McpServer, client: CursorClient, 
         return ok({ source: "GET /v1/environments/{id}/builds/{buildId}", policy,
           text: `${build.buildId}  ${build.status}; activation is reported separately.`,
           structured: { status, authority: "api-key", build, monitor: { status, outcome: build.outcome, terminal: build.terminal, attempts,
-            elapsedMs: Math.round(performance.now() - started), deadlineExceeded: controller.signal.aborted } },
+            elapsedMs: Math.round(observation.clock.now() - started), deadlineExceeded: observation.stopReason() === "deadline" } },
         });
-      } finally { clearTimeout(timer); }
+      }); } catch (error) {
+        if (error instanceof WaitStoppedError) {
+          const detail = error.reason === "deadline" ? "reached its deadline before a Build status was observed" : error.reason === "shutdown" ? "stopped because the server shut down" : "was cancelled by the caller";
+          const message = `Build observation ${detail}; no Build was cancelled. Retry cursor_get_build with the same target.`;
+          throw error.reason === "deadline" ? new CursorTransportError(message) : new CursorCancelledError(message);
+        }
+        throw error;
+      } finally { observation.dispose(); }
     },
   })) names.push("cursor_get_build");
   if (defineTool(server, policy, profile, {

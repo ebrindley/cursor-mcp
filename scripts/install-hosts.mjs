@@ -25,7 +25,9 @@ const configs = {
   grok: path.join(process.env.GROK_CONFIG_DIR || process.env.GROK_HOME || path.join(home, '.grok'), 'config.toml'),
   cursor: path.join(home, '.cursor/mcp.json'),
 };
-const present = (host) => host === 'cursor' ? fs.existsSync(path.dirname(configs.cursor)) : spawnSync('/bin/sh', ['-c', 'command -v "$1" >/dev/null 2>&1', 'sh', host]).status === 0;
+// Native process-boundary watchdog before the runtime build. Ignored stdio avoids
+// inherited output pipes; settlement still relies on the OS reaping this shell.
+const present = (host) => host === 'cursor' ? fs.existsSync(path.dirname(configs.cursor)) : spawnSync('/bin/sh', ['-c', 'command -v "$1" >/dev/null 2>&1', 'sh', host], { timeout: 5_000, killSignal: 'SIGKILL', stdio: 'ignore' }).status === 0;
 const addAllowed = (host) => options.install && (host === 'cursor' ? options.withCursor : options.hosts.length ? options.hosts.includes(host) : present(host));
 
 function updatedArgs(old) {

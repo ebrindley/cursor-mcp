@@ -1,5 +1,7 @@
 import type { TerminalService } from './terminal.js';
 import type { TerminalSessions } from './terminal-sessions.js';
+import { independently, requestScope, withWaitScope } from './request-context.js';
+import { createWaitScope, within, WaitStoppedError } from './wait.js';
 
 export type TerminalTarget = { terminal: TerminalService; sessions: TerminalSessions };
 type RetainedTarget = TerminalTarget & { inFlight: number };
@@ -28,6 +30,31 @@ export class TerminalTargets {
   }
 
   async handle(agentId: string, operation: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const requestedWait = typeof args.waitMs === 'number' && Number.isInteger(args.waitMs) && args.waitMs >= 0 && args.waitMs <= 60000 ? args.waitMs : 30000;
+    const observer = requestScope(operation === 'wake' ? 65000 + requestedWait : 45000);
+    const cancel = () => observer.stop('caller_cancelled');
+    if (signal?.aborted) cancel(); else signal?.addEventListener('abort', cancel, { once: true });
+    let pending: Promise<Record<string, unknown>> | undefined;
+    try { return await withWaitScope(observer, () => within(observer, () => {
+      pending = this.dispatch(agentId, operation, args, signal);
+      return pending;
+    })); }
+    catch (error) {
+      if (error instanceof WaitStoppedError) {
+        // Let stopped children serialize facts they already know. This starts no remote work.
+        if (pending) {
+          const finalization = createWaitScope({ timeoutMs: 5000 });
+          try { return await independently(() => within(finalization, () => pending!)); }
+          catch { /* Preserve a bounded stopped response if a custom handler never settles. */ }
+          finally { finalization.dispose(); }
+        }
+        return { status: error.reason === 'deadline' ? 'deadline' : 'request_cancelled', agentId };
+      }
+      throw error;
+    } finally { observer.dispose(); signal?.removeEventListener('abort', cancel); }
+  }
+
+  private async dispatch(agentId: string, operation: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
     if (this.closed) return { status: 'closed', agentId };
     if (signal?.aborted) return { status: 'request_cancelled', agentId };
     let target = this.targets.get(agentId);

@@ -58,6 +58,15 @@ describe("bounded stream consumer", () => {
     expect(await result).toMatchObject({ truncated: true, stopReason: "time-limit" });
     expect(cancelled).toHaveBeenCalledOnce();
   });
+
+  it("returns when reader cancellation itself never settles", async () => {
+    const cancel = vi.fn(() => new Promise<void>(() => {}));
+    const controller = new AbortController();
+    const reading = consumeRunStream(new Response(new ReadableStream({ cancel })), controller.signal, 4096);
+    controller.abort();
+    expect(await reading).toMatchObject({ truncated: true, stopReason: "time-limit" });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
 });
 
 describe("stream transport", () => {

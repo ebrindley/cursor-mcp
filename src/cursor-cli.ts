@@ -36,12 +36,14 @@
  * Integration uses commands and flags advertised by the configured CLI.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { sanitize } from "./untrusted.js";
+import { currentRequestScope, independently, requestScope, withWaitScope } from "./request-context.js";
+import { createWaitScope, schedule, waitFor, within, WaitStoppedError, type DisposableTimer, type StopReason } from "./wait.js";
 
 /** The authority label these results carry. Not `api-key`, not `delegated-run`. */
 export const CLI_AUTHORITY = "cursor-cli" as const;
@@ -117,6 +119,8 @@ export const CursorCliSchema = z.strictObject({
    */
   teamWritesEnabled: z.boolean().default(false),
   timeoutMs: z.number().int().min(1_000).max(120_000).default(DEFAULT_CLI_TIMEOUT_MS),
+  /** Whole operation, including readiness and readback; never renewed per child. */
+  operationTimeoutMs: z.number().int().min(1_000).max(600_000).optional(),
   maxOutputBytes: z
     .number()
     .int()
@@ -134,9 +138,54 @@ export const CursorCliSchema = z.strictObject({
     .refine((value) => SAFE_PATH.test(value), "cwd must contain no control characters")
     .refine(isAbsolute, "cwd must be absolute")
     .optional(),
-});
+}).refine(value => value.operationTimeoutMs === undefined || !(value.publishEnabled || value.databaseSaveEnabled || value.deleteEnabled) || value.operationTimeoutMs > 2 * value.timeoutMs + CLI_KILL_GRACE_MS,
+  { path: ["operationTimeoutMs"], message: "operationTimeoutMs must exceed two process limits plus termination cleanup, leaving time for preparation" });
 
 export type CursorCli = z.infer<typeof CursorCliSchema>;
+
+export function cliOperationTimeoutMs(cli: CursorCli | undefined): number {
+  return cli?.operationTimeoutMs ?? Math.max(45_000, 3 * (cli?.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS) + CLI_KILL_GRACE_MS);
+}
+
+export async function withCliOperation<T>(cli: CursorCli | undefined, operation: () => Promise<T>): Promise<T> {
+  const scope = requestScope(cliOperationTimeoutMs(cli));
+  try { return await withWaitScope(scope, operation); }
+  finally { scope.dispose(); }
+}
+
+/** Bounds injected runners too; admission closes before a stopped scope can spawn. */
+const nativeCliRunners = new WeakSet<CliRunner>();
+export function boundedCliRunner(cli: CursorCli, run: CliRunner): CliRunner {
+  if (nativeCliRunners.has(run)) return run;
+  const bounded: CliRunner = async (args, options) => {
+    const scope = requestScope(cli.timeoutMs);
+    let submitted = false;
+    try {
+      const result = await waitFor(scope, () => {
+        if (!options?.write) return withWaitScope(scope, () => run(args, options));
+        submitted = true;
+        return independently(async () => {
+          const owner = createWaitScope({ timeoutMs: cli.timeoutMs });
+          try {
+            const owned = await waitFor(owner, () => withWaitScope(owner, () => run(args, options)));
+            if (owned.kind === "completed") return { ...owned.value, submitted: owned.value.submitted ?? owned.value.outcome !== "spawn-failed" };
+            if (owned.kind === "failed") throw owned.error;
+            return { ...stoppedCliRun(owned.reason), submitted: true };
+          } finally { owner.dispose(); }
+        });
+      });
+      if (result.kind === "completed") return result.value;
+      if (result.kind === "failed") throw result.error;
+      return { ...stoppedCliRun(result.reason), ...(options?.write ? { submitted } : {}) };
+    } finally { scope.dispose(); }
+  };
+  nativeCliRunners.add(bounded);
+  return bounded;
+}
+
+function stoppedCliRun(reason: StopReason): CliRun {
+  return { outcome: "timed-out", exitCode: null, signal: null, stdout: "", stderr: "", truncated: false, stopReason: reason };
+}
 
 /* ------------------------------------------------------------------ digests */
 
@@ -161,11 +210,17 @@ export interface CliRun {
   truncated: boolean;
   /** Present only for `spawn-failed`, and only the errno code, never a path. */
   errorCode?: string;
+  /** Observation stopped; termination does not prove whether a write happened. */
+  stopReason?: StopReason;
+  /** False proves dispatch was not admitted; absent is legacy runner evidence. */
+  submitted?: boolean;
 }
 
 /** Optional stdin for a write that must supply a document. Reads omit this. */
 export interface CliRunOptions {
   stdin?: string;
+  /** Accepted mutation owns its process deadline independently of the observer. */
+  write?: boolean;
 }
 
 /** The one seam tests replace. Production builds it from a `CursorCli`. */
@@ -263,7 +318,7 @@ function killGroup(pid: number, signal: NodeJS.Signals): void {
  */
 export function cursorCliRunner(cli: CursorCli): CliRunner {
   const cwd = cli.cwd ?? tmpdir();
-  return (args: readonly string[], options?: CliRunOptions) => {
+  const run: CliRunner = (args: readonly string[], options?: CliRunOptions) => {
     for (const arg of args) {
       if (!SAFE_ARG.test(arg)) {
         throw new CliArgumentError(
@@ -277,44 +332,79 @@ export function cursorCliRunner(cli: CursorCli): CliRunner {
         "CLI stdin exceeds cursorCli.maxOutputBytes; the document is not sent",
       );
     }
+    const observer = requestScope(cli.timeoutMs);
+    const stopped = observer.stopReason();
+    if (stopped) { observer.dispose(); return Promise.resolve({ ...stoppedCliRun(stopped), submitted: false }); }
+    const scope = options?.write ? createWaitScope({ timeoutMs: cli.timeoutMs }) : observer;
     return new Promise<CliRun>((resolve) => {
       const stdout = new BoundedStream(cli.maxOutputBytes);
       const stderr = new BoundedStream(cli.maxOutputBytes);
       let settled = false;
       let timedOut = false;
-      let killTimer: NodeJS.Timeout | undefined;
+      let killTimer: DisposableTimer | undefined;
+      let stopping = false;
       const useStdin = stdin !== undefined;
 
-      const child = spawn(cli.path, [...args], {
-        cwd,
-        env: cliChildEnv(),
-        stdio: [useStdin ? "pipe" : "ignore", "pipe", "pipe"],
-        shell: false,
-        detached: true,
-        windowsHide: true,
-      });
+      let child: ChildProcess;
+      try {
+        const launch = () => spawn(cli.path, [...args], {
+          cwd,
+          env: cliChildEnv(),
+          stdio: [useStdin ? "pipe" : "ignore", "pipe", "pipe"],
+          shell: false,
+          detached: true,
+          windowsHide: true,
+        });
+        child = options?.write ? independently(launch) : launch();
+      } catch (error) {
+        scope.dispose();
+        observer.dispose();
+        const code = (error as NodeJS.ErrnoException).code;
+        resolve({ outcome: "spawn-failed", exitCode: null, signal: null,
+          stdout: "", stderr: "", truncated: false, submitted: false,
+          ...(code === undefined ? {} : { errorCode: code }) });
+        return;
+      }
 
-      const finish = (run: CliRun) => {
+      const finish = (run: CliRun, ownerFinished = true) => {
+        if (ownerFinished) {
+          scope.signal.removeEventListener("abort", onStop);
+          scope.dispose();
+        }
+        observer.signal.removeEventListener("abort", onObserverStop);
+        observer.dispose();
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
-        if (killTimer !== undefined) clearTimeout(killTimer);
         resolve(run);
       };
 
       const stop = () => {
-        if (child.pid === undefined) return;
+        if (stopping || child.pid === undefined) return;
+        stopping = true;
         const pid = child.pid;
         killGroup(pid, "SIGTERM");
-        killTimer = setTimeout(() => killGroup(pid, "SIGKILL"), CLI_KILL_GRACE_MS);
+        killTimer = schedule(CLI_KILL_GRACE_MS, () => {
+          killGroup(pid, "SIGKILL");
+          // An inherited pipe can survive the direct child and its process group.
+          // Release this host's observation handles without asserting termination.
+          child.stdin?.destroy();
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          child.unref();
+        });
         killTimer.unref();
       };
 
-      const timer = setTimeout(() => {
+      const onStop = () => {
         timedOut = true;
         stop();
-      }, cli.timeoutMs);
-      timer.unref();
+        finish({ ...stoppedCliRun(scope.stopReason() ?? "deadline"), stdout: stdout.text(), stderr: stderr.text(), truncated: stdout.truncated || stderr.truncated, submitted: true });
+      };
+      const onObserverStop = () => {
+        finish({ ...stoppedCliRun(observer.stopReason() ?? "caller_cancelled"), stdout: stdout.text(), stderr: stderr.text(), truncated: stdout.truncated || stderr.truncated, submitted: child.pid !== undefined }, false);
+      };
+      scope.signal.addEventListener("abort", onStop, { once: true });
+      if (options?.write) observer.signal.addEventListener("abort", onObserverStop, { once: true });
 
       // An oversized stream is stopped rather than drained: reading past the
       // ceiling costs work and buys nothing, and `truncated` already reports it.
@@ -339,11 +429,13 @@ export function cursorCliRunner(cli: CursorCli): CliRunner {
           stdout: "",
           stderr: "",
           truncated: false,
+          submitted: false,
           ...(error.code === undefined ? {} : { errorCode: error.code }),
         });
       });
 
       child.on("close", (code, signal) => {
+        if (!stopping) killTimer?.dispose();
         finish({
           outcome: timedOut ? "timed-out" : "exited",
           exitCode: code,
@@ -351,10 +443,13 @@ export function cursorCliRunner(cli: CursorCli): CliRunner {
           stdout: stdout.text(),
           stderr: stderr.text(),
           truncated: stdout.truncated || stderr.truncated,
+          submitted: true,
         });
       });
     });
   };
+  nativeCliRunners.add(run);
+  return run;
 }
 
 /* ------------------------------------------------------------ command lines */
@@ -771,7 +866,9 @@ export async function detectCursorCliCapability(args: {
   cli: CursorCli;
   run: CliRunner;
 }): Promise<CliCapability> {
-  const { cli, run } = args;
+  if (!currentRequestScope()) return withCliOperation(args.cli, () => detectCursorCliCapability(args));
+  const { cli } = args;
+  const run = boundedCliRunner(cli, args.run);
   const versionRun = await run(["--version"]);
   if (versionRun.outcome === "spawn-failed") {
     const missing =
@@ -795,8 +892,8 @@ export async function detectCursorCliCapability(args: {
       availability: "UNREADABLE",
       compatible: false,
       commands: [],
-      reason: `The Cursor CLI did not print a version within ${cli.timeoutMs} ms and was terminated.`,
-      nextSteps: ["Raise `cursorCli.timeoutMs`, or check the CLI by hand.", RECHECK],
+      reason: "CLI version observation stopped; termination was requested and no usable version was observed.",
+      nextSteps: ["Check the CLI by hand and the configured process and operation budgets.", RECHECK],
     });
   }
   if (versionRun.truncated) {
@@ -865,7 +962,7 @@ export async function detectCursorCliCapability(args: {
       commands: [],
       reason:
         helpRun.outcome === "timed-out"
-          ? `The Cursor CLI did not print help within ${cli.timeoutMs} ms and was terminated.`
+          ? "CLI help observation stopped; termination was requested and its command set remains unknown."
           : "The Cursor CLI did not print help successfully, so its command set is unknown.",
       nextSteps: [
         "No command is issued while the command set is unknown; that is deliberate.",
@@ -979,7 +1076,9 @@ export async function verifyCursorCliIdentity(args: {
   capability: CliCapability;
   restEmail: string | undefined;
 }): Promise<CliIdentity> {
-  const { cli, run, capability: cap, restEmail } = args;
+  if (!currentRequestScope()) return withCliOperation(args.cli, () => verifyCursorCliIdentity(args));
+  const { cli, capability: cap, restEmail } = args;
+  const run = boundedCliRunner(cli, args.run);
   if (!cap.identityCommandRegistered) {
     return {
       state: "unreadable",
@@ -1002,7 +1101,7 @@ export async function verifyCursorCliIdentity(args: {
   if (identityRun.outcome === "timed-out") {
     return {
       state: "unreadable",
-      reason: `The CLI did not report its identity within ${cli.timeoutMs} ms and was terminated.`,
+      reason: "CLI identity observation stopped; termination was requested and identity remains unverified.",
     };
   }
   if (identityRun.outcome === "spawn-failed") {
@@ -1124,7 +1223,9 @@ export async function cursorCliReadiness(args: {
   /** Fetched only after version and command registration have passed. */
   getRestEmail?: (() => Promise<string | undefined>) | undefined;
 }): Promise<CliReadiness> {
-  const { cli, runner } = args;
+  if (!currentRequestScope()) return withCliOperation(args.cli, () => cursorCliReadiness(args));
+  const { cli } = args;
+  const runner = cli && args.runner ? boundedCliRunner(cli, args.runner) : args.runner;
   if (cli === undefined || runner === undefined) {
     const cap = notConfiguredCapability();
     return {
@@ -1157,8 +1258,14 @@ export async function cursorCliReadiness(args: {
     };
   }
 
-  const restEmail =
-    args.getRestEmail === undefined ? args.restEmail : await args.getRestEmail();
+  let restEmail;
+  try { restEmail = args.getRestEmail === undefined ? args.restEmail : await within(currentRequestScope()!, args.getRestEmail); }
+  catch (error) {
+    if (!(error instanceof WaitStoppedError)) throw error;
+    return { ready: false, status: "CLI_TIMED_OUT", capability: cap,
+      reason: "CLI operation observation stopped before API-key identity could be verified. No environment command was issued.",
+      nextSteps: [NO_VM_FALLBACK, AGENT_INVENTORY] };
+  }
 
   const identity = await verifyCursorCliIdentity({
     cli,
@@ -1231,7 +1338,7 @@ export function classifyCliRun(
   if (run.outcome === "timed-out") {
     return {
       status: "CLI_TIMED_OUT",
-      reason: `The CLI did not finish ${label} within ${cli.timeoutMs} ms and was terminated.`,
+      reason: `CLI observation stopped while ${label} (${run.stopReason ?? "deadline"}); the command outcome is unproven.`,
     };
   }
   if (run.outcome === "spawn-failed") {
@@ -1307,6 +1414,7 @@ export async function cursorCliWriteReadiness(args: {
   restEmail?: string | undefined;
   getRestEmail?: (() => Promise<string | undefined>) | undefined;
 }): Promise<CliWriteReadiness> {
+  if (!currentRequestScope()) return withCliOperation(args.cli, () => cursorCliWriteReadiness(args));
   const read = await cursorCliReadiness({
     cli: args.cli,
     runner: args.runner,

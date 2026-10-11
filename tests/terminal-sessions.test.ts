@@ -1,12 +1,14 @@
 import { test, expect, vi } from 'vitest';
 import { TerminalSessions } from '../src/terminal-sessions.js';
 import { TerminalFailure, type TerminalConnector, type TerminalPeer } from '../src/terminal-gateway.js';
+import { createWaitScope } from '../src/wait.js';
+import { withWaitScope } from '../src/request-context.js';
 
 function fixture(bytes = 65536, capacity = 4) {
   const calls: { method: string; input: Record<string, unknown> }[] = [];
   const listeners = new Map<string, { event: (e: Record<string, unknown>) => void; reject: (e: Error) => void }>();
   const present = new Set<string>(); let releaseSpawn: (() => void) | undefined; let pauseSpawn = false;
-  let counter = 0, failInput = false, failCleanup = false, changed = false, failSpawn = false;
+  let counter = 0, failInput = false, failCleanup = false, changed = false, failSpawn = false, hangCleanup = false;
   let timeoutMethod: string | undefined;
   const connector: TerminalConnector = { async connect(expected) {
     calls.push({ method: 'Connect', input: { expected } });
@@ -16,7 +18,7 @@ function fixture(bytes = 65536, capacity = 4) {
       if (method === timeoutMethod) { timeoutMethod = undefined; throw new TerminalFailure('terminal_rpc_timeout', true); }
       if (method === 'SpawnPty') { if (pauseSpawn) await new Promise<void>(resolve => { releaseSpawn = resolve; }); if (failSpawn) throw new TerminalFailure('gateway_disconnected', true); const ptyId = `pty-${++counter}`; present.add(ptyId); return { ptyId }; }
       if (method === 'SendInput' && failInput) throw new TerminalFailure('gateway_disconnected', true);
-      if (method === 'TerminatePty') { if (failCleanup) throw new TerminalFailure('gateway_disconnected', true); present.delete(input.ptyId as string); }
+      if (method === 'TerminatePty') { if (hangCleanup) return new Promise(() => {}); if (failCleanup) throw new TerminalFailure('gateway_disconnected', true); present.delete(input.ptyId as string); }
       if (method === 'ListPtys') return { ptys: [...present].map(ptyId => ({ ptyId })) };
       return { success: true };
     }, stream(_method, input, event, signal) {
@@ -32,7 +34,7 @@ function fixture(bytes = 65536, capacity = 4) {
   const request = (operation: string, args = {}) => ({ operation, sessionId: service.sessionId, ...args });
   return { service, calls, request, pauseSpawn: () => { pauseSpawn = true; }, releaseSpawn: () => releaseSpawn!(),
     timeoutNext: (method: string) => { timeoutMethod = method; },
-    inputFails: () => { failInput = true; }, cleanupFails: () => { failCleanup = true; }, recover: () => { failCleanup = false; },
+    inputFails: () => { failInput = true; }, cleanupFails: () => { failCleanup = true; }, hangCleanup: () => { hangCleanup = true; }, recover: () => { failCleanup = false; },
     changed: () => { changed = true; }, spawnFails: () => { failSpawn = true; },
     event: (event: Record<string, unknown>, pty = 'pty-1') => listeners.get(pty)!.event(event),
     drop: (pty = 'pty-1') => listeners.get(pty)!.reject(new TerminalFailure('gateway_disconnected')),
@@ -53,6 +55,50 @@ test('creation keeps its connection for attachment and input, then reconnects af
     await f.service.handle(f.request('attach', { terminalId: created.terminalId }));
     expect(f.calls.filter(c => c.method === 'Connect').map(c => c.input.expected)).toEqual([undefined, 'machine']);
   } finally { f.service.close(); }
+});
+
+test('accepted shell creation retains its reservation after the caller stops observing', async () => {
+  const f = fixture(), observer = createWaitScope({ timeoutMs: 1000 });
+  try {
+    f.pauseSpawn();
+    const creating = withWaitScope(observer, () => f.create());
+    await vi.waitFor(() => expect(f.calls.some(call => call.method === 'SpawnPty')).toBe(true));
+    observer.stop('caller_cancelled');
+    expect(await creating).toMatchObject({ status: 'request_cancelled', state: 'starting', creationOutcome: 'unknown' });
+    expect(f.service.retention.creating).toBe(true);
+    expect(await f.create(2)).toMatchObject({ status: 'busy' });
+    f.releaseSpawn();
+    await vi.waitFor(async () => expect(await f.create()).toMatchObject({ creationOutcome: 'submitted' }));
+    expect(f.calls.filter(call => call.method === 'SpawnPty')).toHaveLength(1);
+    expect(f.calls.some(call => call.method === 'TerminatePty')).toBe(false);
+  } finally { observer.dispose(); f.service.close(); }
+});
+
+test('a late spawn identity updates its retained shell record after bounded startup stops', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+  const f = fixture();
+  try {
+    f.pauseSpawn();
+    const creating = f.create();
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(await creating).toMatchObject({ state: 'unknown', creationOutcome: 'unknown', cleanup: 'identity_unknown' });
+    f.releaseSpawn();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await f.create()).toMatchObject({ state: 'detached', creationOutcome: 'submitted', releaseAvailable: false });
+    expect(f.calls.filter(call => call.method === 'SpawnPty')).toHaveLength(1);
+  } finally { f.service.close(); vi.useRealTimers(); }
+});
+
+test('cleanup that ignores cancellation returns termination_unconfirmed within its independent allowance', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+  const f = fixture();
+  try {
+    const created = await f.create(); f.hangCleanup();
+    const closing = f.service.handle(f.request('close', { terminalId: created.terminalId }));
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(await closing).toMatchObject({ state: 'detached', cleanup: 'termination_unconfirmed' });
+    expect((await f.service.handle(f.request('list'))).terminals).toHaveLength(1);
+  } finally { f.service.close(); vi.useRealTimers(); }
 });
 
 test('owned sessions support persistent input/resize, bounded concurrency and safe sequence retirement', async () => {

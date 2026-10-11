@@ -201,6 +201,7 @@ function recordingOps(
   };
   const wrapped: LifecycleOperations = {
     now: over.now ?? base.now,
+    elapsedNow: over.elapsedNow ?? over.now ?? base.now,
     inspect: async (input) => {
       if (over.inspect === undefined) return base.inspect(input);
       calls.push("inspect");
@@ -506,6 +507,29 @@ describe("timeout", () => {
 });
 
 describe("cancellation", () => {
+  it("bounds an atomic step that never settles and starts no later step", async () => {
+    const ops = recordingOps({ inspect: () => new Promise(() => {}) });
+    const result = await runEnvironmentLifecycle(lifecycle({ timeoutMs: 10 }), ops);
+    expect(result.status).toBe("TIMED_OUT");
+    expect(ops.calls).toEqual(["inspect"]);
+    expect(result.steps.at(-1)?.reason).toContain("Reconcile before retrying");
+  });
+
+  it("keeps elapsed budgets separate from public dates", async () => {
+    let elapsed = 0, wall = 1000;
+    const ops = recordingOps({
+      now: () => wall,
+      elapsedNow: () => elapsed,
+      inspect: async () => { elapsed = 20; wall = -1000; return inspectOk(); },
+    });
+    const result = await runEnvironmentLifecycle(lifecycle({ timeoutMs: 10 }), ops);
+    expect(result.status).toBe("TIMED_OUT");
+    expect(ops.calls).toEqual(["inspect"]);
+    expect(result.timings.startedAtMs).toBe(1000);
+    expect(result.timings.endedAtMs).toBe(-1000);
+    expect(result.timings.durationMs).toBe(20);
+  });
+
   it("requests CANCEL_BUILD for an adopted Build when the caller aborts", async () => {
     const controller = new AbortController();
     const ops = recordingOps({

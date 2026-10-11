@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { activeProfile, type Policy } from '../config.js';
 import type { AgentScope } from '../agent-scope.js';
 import { TerminalTargets } from '../terminal-targets.js';
-import { currentRequestSignal } from '../client.js';
+import { currentRequestSignal, independently, requestScope, withWaitScope } from '../request-context.js';
+import { createWaitScope, within, WaitStoppedError } from '../wait.js';
 import { CursorTerminalConnector } from '../terminal-gateway.js';
 import { TerminalSessions } from '../terminal-sessions.js';
 import { TerminalService } from '../terminal.js';
@@ -30,6 +31,22 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
   const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
   const sessionId = z.string().uuid();
   const invoke = async (operation: string, args: Record<string, unknown> = {}) => {
+    // Discovery admission has its own 30s slice before wake's precheck/submission/readiness phases.
+    const budget = requestScope(operation === 'wake' ? 95000 + Number(args.waitMs ?? 30000) : 45000);
+    let pending: ReturnType<typeof invokeBounded> | undefined;
+    try { return await withWaitScope(budget, () => within(budget, () => {
+      pending = invokeBounded(operation, args);
+      return pending;
+    })); }
+    catch (error) {
+      if (!(error instanceof WaitStoppedError) || !pending) throw error;
+      const finalization = createWaitScope({ timeoutMs: 5000 });
+      try { return await independently(() => within(finalization, () => pending!)); }
+      finally { finalization.dispose(); }
+    }
+    finally { budget.dispose(); }
+  };
+  const invokeBounded = async (operation: string, args: Record<string, unknown>) => {
     const started = performance.now();
     const signal = currentRequestSignal();
     let raw: Record<string, unknown>;
@@ -70,7 +87,7 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
   const add = (operation: string, description: string, schema: z.ZodRawShape, annotations: typeof READ | typeof CANCEL | typeof DESTRUCTIVE | typeof REVERSIBLE) => {
     if (!annotations.readOnlyHint && !config.executeEnabled) return;
     const name = `cursor_terminal_${operation}`;
-    if (defineTool(server, policy, profile, { name, config: { title: `Cursor Cloud: VM terminal ${operation.replaceAll('_', ' ')}`, description, inputSchema: { agentId: z.string().max(128).regex(/^bc-[A-Za-z0-9-]+$/).optional(), ...schema }, annotations },
+    if (defineTool(server, policy, profile, { name, ...(operation === 'wake' ? { waitBudgetMs: null } : {}), config: { title: `Cursor Cloud: VM terminal ${operation.replaceAll('_', ' ')}`, description, inputSchema: { agentId: z.string().max(128).regex(/^bc-[A-Za-z0-9-]+$/).optional(), ...schema }, annotations },
       handler: (args: Record<string, unknown>) => invoke(operation, args) })) names.push(name);
   };
   add('status', 'Check VM availability and get its command sessionId; does not intentionally request a wake. agentId defaults to the configured target. overview lists retained targets; follow targetNextOffset.', { overview: z.boolean().default(false), targetOffset: z.number().int().min(0).max(128).default(0), targetLimit: z.number().int().min(1).max(128).default(10) }, READ);

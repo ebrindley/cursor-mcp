@@ -14,6 +14,12 @@ supplies a progress token gets counter notifications while the read runs; see
 client-dependent display behavior. Cancellation or client
 disconnect stops monitoring, not the run.
 
+Observation uses one monotonic deadline selected before the agent lookup. Stream
+reads and final status reads share that budget; a transport or reader that ignores
+cancellation cannot extend the response wait. Reader cancellation is best effort
+and may settle after the response. A stopped observation makes no new claim about
+the cloud run.
+
 The response includes `eventsRead`, `bytesRead`, `done`, `truncated`, `stopReason`,
 `lastEventId` when usable, `replayRequired`, and `statusVerified`. `status` and
 `terminal` are present only when REST readback verifies the requested run identity.

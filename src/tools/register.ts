@@ -19,6 +19,7 @@ import { isToolAllowed } from "../config.js";
 import { log } from "../log.js";
 import { ProgressReporter, type ProgressSend, type ProgressToken } from "../progress.js";
 import { guard, type ToolResult } from "./result.js";
+import { requestScope, withWaitScope } from "../request-context.js";
 
 /** The part of the SDK's request extra this module reads. */
 interface RequestExtra {
@@ -77,6 +78,8 @@ export interface ToolSpec<C extends GateableConfig, A extends unknown[]> {
    * must not grant promotion.
    */
   activation?: boolean;
+  /** null lets a phased adapter select its budget before admission. */
+  waitBudgetMs?: number | null | ((...args: A) => number | null);
   handler: (...args: A) => Promise<ToolResult>;
 }
 
@@ -130,7 +133,13 @@ export function defineTool<C extends GateableConfig, A extends unknown[]>(
   const guarded = guard(policy, spec.handler, outputSchema);
   const handler = (...args: A) => {
     const extra = args.at(-1) as RequestExtra | undefined;
-    const run = () => withProgress(extra, () => guarded(...args));
+    const run = () => withProgress(extra, async () => {
+      const budget = typeof spec.waitBudgetMs === "function" ? spec.waitBudgetMs(...args) : spec.waitBudgetMs;
+      if (budget === null) return guarded(...args);
+      const scope = requestScope(budget ?? 45_000);
+      try { return await withWaitScope(scope, () => guarded(...args)); }
+      finally { scope.dispose(); }
+    });
     return extra?.signal instanceof AbortSignal
       ? withRequestSignal(extra.signal, run)
       : run();

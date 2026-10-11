@@ -10,7 +10,9 @@
  */
 
 import type { z } from "zod";
-import { AsyncLocalStorage } from "node:async_hooks";
+import { createWaitScope, within, sleep as scopedSleep, delay, WaitStoppedError, type WaitScope } from "./wait.js";
+import { currentRequestScope, currentRequestSignal } from "./request-context.js";
+export { currentRequestScope, currentRequestSignal, currentRequestProgress, withRequestSignal, withRequestProgress } from "./request-context.js";
 import {
   CursorApiError,
   CursorContractError,
@@ -18,7 +20,6 @@ import {
 } from "./errors.js";
 import { USAGE_LIMITED_CLASS, classifyApiError, parseApiError } from "./api-errors.js";
 import { log } from "./log.js";
-import type { ProgressReporter } from "./progress.js";
 import { sanitize } from "./untrusted.js";
 import { consumeRunStream, RESUME_ID, type StreamCounts, type StreamTail } from "./run-stream.js";
 
@@ -32,40 +33,6 @@ const MAX_BACKOFF_MS = 8_000;
 const MAX_BODY_BYTES = 4_000_000;
 /** Statuses whose responses carry no body by definition. */
 const BODILESS_STATUS = new Set([204, 205, 304]);
-const requestSignal = new AsyncLocalStorage<AbortSignal>();
-const requestProgress = new AsyncLocalStorage<ProgressReporter>();
-
-export function withRequestSignal<T>(
-  signal: AbortSignal,
-  operation: () => Promise<T>,
-): Promise<T> {
-  return requestSignal.run(signal, operation);
-}
-
-/** The MCP request's cancellation signal, when a tool call is in progress. */
-export function currentRequestSignal(): AbortSignal | undefined {
-  return requestSignal.getStore();
-}
-
-/**
- * Carry a progress reporter for the current tool call, alongside its signal.
- *
- * The same request-scoped mechanism, for the same reason: a handler deep in a
- * poll loop needs the request's notification channel without every tool
- * signature growing a parameter it does not use.
- */
-export function withRequestProgress<T>(
-  reporter: ProgressReporter,
-  operation: () => Promise<T>,
-): Promise<T> {
-  return requestProgress.run(reporter, operation);
-}
-
-/** The reporter for the tool call in progress, when the client asked for one. */
-export function currentRequestProgress(): ProgressReporter | undefined {
-  return requestProgress.getStore();
-}
-
 /** Thrown when the caller cancelled the MCP request. Never retried. */
 export class CursorCancelledError extends CursorTransportError {
   constructor(message: string) {
@@ -80,24 +47,19 @@ export class CursorCancelledError extends CursorTransportError {
  * Used for retry backoff and for run polling. A cancelled request must not keep
  * a handler parked in a timer for up to eight seconds after the client gave up.
  */
-export function pause(
+export async function pause(
   ms: number,
   signal: AbortSignal | undefined,
   sleepImpl: (ms: number) => Promise<void> = sleep,
 ): Promise<void> {
-  if (signal === undefined) return sleepImpl(ms);
-  if (signal.aborted) return Promise.reject(new CursorCancelledError("cancelled by the caller"));
-  return new Promise<void>((resolve, reject) => {
-    const onAbort = () => {
-      signal.removeEventListener("abort", onAbort);
-      reject(new CursorCancelledError("cancelled by the caller"));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    sleepImpl(ms).then(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, reject);
-  });
+  const scope = createWaitScope({ timeoutMs: Math.max(ms + 1000, 1000), signal });
+  try {
+    if (sleepImpl === sleep) await scopedSleep(scope, ms);
+    else await within(scope, () => sleepImpl(ms));
+  } catch (error) {
+    if (error instanceof WaitStoppedError) throw new CursorCancelledError("cancelled by the caller");
+    throw error;
+  } finally { scope.dispose(); }
 }
 
 export interface ClientOptions {
@@ -125,7 +87,7 @@ export interface RequestOptions {
   retry?: false;
 }
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const sleep = delay;
 
 /** A query, a fragment, a backslash, or anything outside printable ASCII. */
 const UNSAFE_PATH = new RegExp("[?#\\\\]|[^\\u0021-\\u007E]");
@@ -179,19 +141,16 @@ export class CursorClient {
     if (options.lastEventId !== undefined && !RESUME_ID.test(options.lastEventId)) {
       throw new CursorTransportError("Invalid run-stream resume id");
     }
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), options.durationMs);
     const caller = options.signal ?? currentRequestSignal();
-    const signal = AbortSignal.any([
-      controller.signal, ...(caller ? [caller] : []), ...(options.deadlineSignal ? [options.deadlineSignal] : []),
-    ]);
+    const scope = createWaitScope({ timeoutMs: options.durationMs, parent: currentRequestScope(), signal: caller });
+    const signal = options.deadlineSignal ? AbortSignal.any([scope.signal, options.deadlineSignal]) : scope.signal;
     let response: Response | undefined;
     try {
-      response = await this.#fetch(url, {
+      response = await within<Response>(scope, () => this.#fetch(url, {
         method: "GET", redirect: "error", signal,
         headers: { Authorization: `Bearer ${this.#apiKey}`, Accept: "text/event-stream", "Accept-Encoding": "identity",
           ...(options.lastEventId === undefined ? {} : { "Last-Event-ID": options.lastEventId }) },
-      });
+      }).then(opened => { if (signal.aborted) void opened.body?.cancel().catch(() => {}); return opened; }));
       if (response.status === 410 || (response.status === 400 && options.lastEventId !== undefined)) {
         return { text: "", eventsRead: 0, bytesRead: 0, done: false, truncated: true,
           stopReason: response.status === 410 ? "expired" : "resume-rejected" };
@@ -201,19 +160,19 @@ export class CursorClient {
         throw new CursorContractError("Run stream did not return text/event-stream");
       }
       const result = await consumeRunStream(response, signal, options.maxBytes, options.lastEventId, options.onCounts);
-      if (caller?.aborted) throw new CursorCancelledError("Run activity read cancelled; the cloud run was not cancelled");
+      if (scope.stopReason() === "caller_cancelled") throw new CursorCancelledError("Run activity read cancelled; the cloud run was not cancelled");
       return result;
     } catch (error) {
-      if (caller?.aborted) throw new CursorCancelledError("Run activity read cancelled; the cloud run was not cancelled");
-      if (controller.signal.aborted || options.deadlineSignal?.aborted) return {
+      if (scope.stopReason() === "caller_cancelled") throw new CursorCancelledError("Run activity read cancelled; the cloud run was not cancelled");
+      if (scope.stopReason() === "deadline" || options.deadlineSignal?.aborted) return {
         text: "", eventsRead: 0, bytesRead: 0, done: false, truncated: true, stopReason: "time-limit",
         ...(options.lastEventId === undefined ? {} : { lastEventId: options.lastEventId }),
       };
       if (error instanceof CursorApiError || error instanceof CursorContractError) throw error;
       throw new CursorTransportError("Run stream could not be read; check the run with cursor_get_run");
     } finally {
-      clearTimeout(timer);
-      await response?.body?.cancel().catch(() => {});
+      scope.dispose();
+      void response?.body?.cancel().catch(() => {});
     }
   }
 
@@ -231,12 +190,14 @@ export class CursorClient {
    */
   async openRunStream(path: string, options: { signal: AbortSignal }): Promise<Response> {
     const url = this.#buildUrl(path, undefined);
+    const scope = createWaitScope({ timeoutMs: this.#totalTimeoutMs, parent: currentRequestScope(), signal: options.signal });
+    try {
     let response: Response;
     try {
-      response = await this.#fetch(url, {
+      response = await within(scope, () => this.#fetch(url, {
         method: "GET",
         redirect: "error",
-        signal: options.signal,
+        signal: scope.signal,
         headers: {
           Authorization: `Bearer ${this.#apiKey}`,
           Accept: "text/event-stream",
@@ -244,9 +205,9 @@ export class CursorClient {
           // buffers every event until close.
           "Accept-Encoding": "identity",
         },
-      });
+      }).then(opened => { if (scope.signal.aborted) void opened.body?.cancel().catch(() => {}); return opened; }));
     } catch (error) {
-      if (options.signal.aborted) {
+      if (scope.stopReason() === "caller_cancelled") {
         throw new CursorCancelledError(`GET ${path} was cancelled before the stream opened`);
       }
       throw new CursorTransportError(`GET ${path} ${this.#reason(error, this.#timeoutMs)}`);
@@ -256,7 +217,7 @@ export class CursorClient {
       // here rather than reduced to a status the caller has to guess about.
       let body = "";
       try {
-        body = await this.#readBody(response, "GET", path);
+        body = await within(scope, () => this.#readBody(response, "GET", path, scope.signal));
       } catch {
         // A refusal we could not read is still a refusal. Fall through with the
         // status alone rather than replacing it with a body-read failure.
@@ -276,13 +237,14 @@ export class CursorClient {
       );
     }
     if (response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "text/event-stream") {
-      await response.body?.cancel().catch(() => {});
+      void response.body?.cancel().catch(() => {});
       throw new CursorContractError("Run stream did not return text/event-stream");
     }
     if (response.body === null) {
       throw new CursorContractError("Run stream returned no response body");
     }
     return response;
+    } finally { scope.dispose(); }
   }
 
   /** POST is never retried: the server may already have acted on it. */
@@ -357,34 +319,44 @@ export class CursorClient {
     retryable: boolean,
   ): Promise<z.infer<S>> {
     let attempt = 0;
-    const deadline = Date.now() + this.#totalTimeoutMs;
+    const scope = createWaitScope({ timeoutMs: this.#totalTimeoutMs, parent: currentRequestScope(), signal: options.signal ?? (currentRequestScope() ? undefined : currentRequestSignal()) });
     const url = this.#buildUrl(path, options.query);
-    const callerSignal = options.signal ?? requestSignal.getStore();
-    for (;;) {
+    try { for (;;) {
       try {
-        const remaining = deadline - Date.now();
+        const remaining = scope.remainingMs();
         if (remaining <= 0) {
           throw new CursorTransportError(
             `${method} ${path} exceeded the ${this.#totalTimeoutMs}ms total deadline`,
           );
         }
-        return await this.#attempt(method, path, url, schema, options, remaining, callerSignal);
+        scope.throwIfStopped();
+        return await this.#attempt(method, path, url, schema, options, scope);
       } catch (error) {
         // A cancelled caller is not a transport failure to retry through: the
         // client has already stopped listening.
+        if (error instanceof WaitStoppedError) {
+          if (error.reason !== "deadline") throw new CursorCancelledError(`${method} ${path} was cancelled by the caller; not dispatched`);
+          throw new CursorTransportError(`${method} ${path} exceeded the ${this.#totalTimeoutMs}ms total deadline; not dispatched`);
+        }
         if (error instanceof CursorCancelledError) throw error;
         const wait = this.#retryDelay(error, attempt, retryable && options.retry !== false);
         if (wait === undefined) throw error;
-        if (Date.now() + wait >= deadline) {
+        if (wait >= scope.remainingMs()) {
           throw new CursorTransportError(
             `${method} ${path} exceeded the ${this.#totalTimeoutMs}ms total deadline`,
           );
         }
         attempt += 1;
         log.debug(`${method} ${path} retry ${attempt} in ${wait}ms`);
-        await pause(wait, callerSignal, this.#sleep);
+        try {
+          if (this.#sleep === sleep) await scopedSleep(scope, wait);
+          else await within(scope, () => this.#sleep(wait));
+        } catch (stopped) {
+          if (stopped instanceof WaitStoppedError && stopped.reason !== "deadline") throw new CursorCancelledError(`${method} ${path} was cancelled by the caller`);
+          throw new CursorTransportError(`${method} ${path} exceeded the ${this.#totalTimeoutMs}ms total deadline`);
+        }
       }
-    }
+    } } finally { scope.dispose(); }
   }
 
   /**
@@ -436,24 +408,20 @@ export class CursorClient {
     url: URL,
     schema: S,
     options: RequestOptions,
-    remainingMs: number,
-    callerSignal: AbortSignal | undefined,
+    parent: WaitScope,
   ): Promise<z.infer<S>> {
-    const controller = new AbortController();
-    const attemptTimeoutMs = Math.min(this.#timeoutMs, remainingMs);
-    const timer = setTimeout(() => controller.abort(), attemptTimeoutMs);
-    const signal =
-      callerSignal === undefined
-        ? controller.signal
-        : AbortSignal.any([controller.signal, callerSignal]);
+    const scope = parent.child(this.#timeoutMs);
+    const attemptTimeoutMs = Math.min(this.#timeoutMs, parent.remainingMs());
+    const signal = scope.signal;
 
     // The timer must survive until the body is fully read. Clearing it once
     // headers arrive leaves a response that sends headers and then stalls
     // hanging forever, with nothing left to abort it.
     try {
+      return await within(scope, async () => {
       let response: Response;
       try {
-        response = await this.#fetch(url, {
+        response = await within(scope, () => this.#fetch(url, {
           method,
           headers: {
             // Bearer, per the v1 authentication docs.
@@ -468,16 +436,16 @@ export class CursorClient {
             : { body: JSON.stringify(options.body) }),
           redirect: "error",
           signal,
-        });
+        }).then(opened => { if (signal.aborted) void opened.body?.cancel().catch(() => {}); return opened; }));
       } catch (error) {
         const uncertain = method === "GET" ? "" : "; the outcome is unknown";
-        if (callerSignal?.aborted) {
+        if (scope.stopReason() === "caller_cancelled" || scope.stopReason() === "shutdown") {
           throw new CursorCancelledError(
             `${method} ${path} was cancelled by the caller${uncertain}`,
           );
         }
         throw new CursorTransportError(
-          `${method} ${path} ${this.#reason(error, attemptTimeoutMs)}${uncertain}`,
+          `${method} ${path} ${scope.stopReason() === "deadline" ? `timed out after ${Math.round(attemptTimeoutMs)}ms` : this.#reason(error, attemptTimeoutMs)}${uncertain}`,
         );
       }
 
@@ -487,10 +455,10 @@ export class CursorClient {
       // like a write that definitely did not land.
       let text: string;
       try {
-        text = await this.#readBody(response, method, path);
+        text = await within(scope, () => this.#readBody(response, method, path, signal));
       } catch (error) {
         if (error instanceof CursorContractError) throw error;
-        if (callerSignal?.aborted) {
+        if (scope.stopReason() === "caller_cancelled" || scope.stopReason() === "shutdown") {
           throw new CursorCancelledError(
             `${method} ${path} responded ${response.status} but the caller cancelled before ` +
               "the body was read; the outcome is unknown",
@@ -498,7 +466,7 @@ export class CursorClient {
         }
         throw new CursorTransportError(
           `${method} ${path} responded ${response.status} but the body ` +
-            `${this.#reason(error, attemptTimeoutMs)}; the outcome is unknown`,
+            `${scope.stopReason() === "deadline" ? `timed out after ${Math.round(attemptTimeoutMs)}ms` : this.#reason(error, attemptTimeoutMs)}; the outcome is unknown`,
         );
       }
 
@@ -567,21 +535,27 @@ export class CursorClient {
         );
       }
       return parsed.data;
-    } finally {
-      clearTimeout(timer);
-    }
+      });
+    } catch (error) {
+      if (error instanceof WaitStoppedError) {
+        const uncertain = method === "GET" ? "" : "; the outcome is unknown";
+        if (error.reason !== "deadline") throw new CursorCancelledError(`${method} ${path} was cancelled by the caller${uncertain}`);
+        throw new CursorTransportError(`${method} ${path} timed out after ${Math.round(attemptTimeoutMs)}ms${uncertain}`);
+      }
+      throw error;
+    } finally { scope.dispose(); }
   }
 
   /**
    * Describe a failure without echoing it. A fetch error can carry the full
    * request, headers included, in its message or cause.
    */
-  async #readBody(response: Response, method: Method, path: string): Promise<string> {
+  async #readBody(response: Response, method: Method, path: string, signal?: AbortSignal): Promise<string> {
     const declared = Number(response.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
       // Release the connection rather than leaving an unread body pinning a
       // keep-alive socket until the agent times it out.
-      await response.body?.cancel().catch(() => undefined);
+      void response.body?.cancel().catch(() => undefined);
       throw new CursorContractError(
         `${method} ${path} declared ${declared} response bytes, over the ` +
           `${MAX_BODY_BYTES} limit`,
@@ -590,14 +564,17 @@ export class CursorClient {
     if (response.body === null) return "";
 
     const reader = response.body.getReader();
+    const cancel = () => { void reader.cancel().catch(() => {}); };
+    signal?.addEventListener("abort", cancel, { once: true });
     const chunks: Uint8Array[] = [];
     let bytes = 0;
-    for (;;) {
+    try { for (;;) {
+      if (signal?.aborted) throw new WaitStoppedError("caller_cancelled");
       const { done, value } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
       if (bytes > MAX_BODY_BYTES) {
-        await reader.cancel();
+        cancel();
         throw new CursorContractError(
           `${method} ${path} exceeded the ${MAX_BODY_BYTES} response-byte limit`,
         );
@@ -605,6 +582,7 @@ export class CursorClient {
       chunks.push(value);
     }
     return Buffer.concat(chunks).toString("utf8");
+    } finally { signal?.removeEventListener("abort", cancel); reader.releaseLock(); }
   }
 
   #reason(error: unknown, timeoutMs: number): string {

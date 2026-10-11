@@ -1,5 +1,7 @@
 # Lifecycle architecture
 
+The [waiting standard](waiting.md) defines shared budgets, cancellation, and uncertain outcomes.
+
 Architecture of the supported tool domains and their authority boundaries.
 See [the capability reference](cursor-capabilities.md) for evidence labels.
 

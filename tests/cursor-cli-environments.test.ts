@@ -45,6 +45,8 @@ import {
   publishEnvironmentWithCli,
   saveEnvironmentWithCli,
 } from "../src/environment-operations.js";
+import { createWaitScope } from "../src/wait.js";
+import { withRequestSignal, withWaitScope } from "../src/request-context.js";
 
 describe("normalizeEnvironmentCatalog", () => {
   it("normalizes ids, names, scope, repositories, and timestamps", () => {
@@ -567,6 +569,40 @@ describe("write binding", () => {
 });
 
 describe("CLI environment writes", () => {
+  it("does not read back or replay a Save when its observer cancels after submission", async () => {
+    const fake = new FakeWriteCli();
+    const request = { cli: cliConfig(), runner: fake.runner(), binding: binding(), document: INTENDED, nowMs: NOW, restEmail: OWNER };
+    const previewed = await saveEnvironmentWithCli(request);
+    fake.calls = [];
+    const controller = new AbortController();
+    const base = fake.runner();
+    const runner: CliRunner = async (args, options) => {
+      const result = await base(args, options);
+      if (options?.write) controller.abort();
+      return result;
+    };
+    const result = await withRequestSignal(controller.signal, () => saveEnvironmentWithCli({
+      ...request, runner, confirm: true, preview: previewed.preview, previewToken: previewed.preview?.previewToken,
+    }));
+    expect(result).toMatchObject({ status: "STATE_UNKNOWN", dispatched: true });
+    expect(fake.writeInvocations()).toEqual([`env save ${ENV_ID} --stdin --output json`]);
+    expect(fake.calls.filter(line => line.startsWith("env get "))).toHaveLength(1);
+    expect(fake.calls.at(-1)).toBe(`env save ${ENV_ID} --stdin --output json`);
+  });
+
+  it("declines dispatch when the parent budget cannot reserve verification", async () => {
+    const fake = new FakeWriteCli();
+    const previewed = await publishEnvironmentWithCli({ cli: cliConfig(), runner: fake.runner(), binding: binding(), nowMs: NOW, restEmail: OWNER });
+    const scope = createWaitScope({ timeoutMs: 1_000 });
+    try {
+      const result = await withWaitScope(scope, () => publishEnvironmentWithCli({
+        cli: cliConfig(), runner: fake.runner(), binding: binding(), nowMs: NOW, restEmail: OWNER,
+        confirm: true, preview: previewed.preview, previewToken: previewed.preview?.previewToken,
+      }));
+      expect(result).toMatchObject({ status: "CLI_OPERATION_BUDGET_EXHAUSTED", dispatched: false });
+      expect(fake.writeInvocations()).toEqual([]);
+    } finally { scope.dispose(); }
+  });
   it("previews publish, then creates a pull request and never reports PERSISTED", async () => {
     const fake = new FakeWriteCli();
     const previewed = await publishEnvironmentWithCli({

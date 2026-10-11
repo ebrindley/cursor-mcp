@@ -1,5 +1,7 @@
 // An offline walkthrough: real MCP handlers, simulated Cursor HTTP responses.
 // No environment credentials, server config, or network transport are used.
+import { requestScope, withWaitScope } from "../dist/request-context.js";
+import { within } from "../dist/wait.js";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -10,9 +12,15 @@ import { CursorClient } from "../dist/client.js";
 import { activeProfile, loadPolicy } from "../dist/config.js";
 import { registerAgentTools } from "../dist/tools/agents.js";
 
-const policy = await loadPolicy(
+async function observed(ms, start) {
+  const scope = requestScope(ms);
+  try { return await withWaitScope(scope, () => within(scope, start)); }
+  finally { scope.dispose(); }
+}
+
+const policy = await observed(10_000, () => loadPolicy(
   fileURLToPath(new URL("../policy.quickstart.json", import.meta.url)), true,
-);
+));
 const repo = "ExampleOrg/ExampleRepo";
 const agentId = "bc-00000000-0000-4000-8000-000000000001";
 const firstRun = "run-1";
@@ -71,15 +79,15 @@ const client = new Client({ name: "offline-demo", version: "1" });
 const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
 async function call(name, args) {
-  const result = await client.callTool({ name, arguments: args });
+  const result = await observed(45_000, () => client.callTool({ name, arguments: args }));
   assert.ok(!result.isError, `${name}: ${JSON.stringify(result.content)}`);
   return result;
 }
 
 try {
-  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  await observed(45_000, () => Promise.all([server.connect(serverTransport), client.connect(clientTransport)]));
   console.log("OFFLINE DEMO: real MCP tools; simulated Cursor responses and PR link. No API key or network.");
-  const listed = await client.listTools();
+  const listed = await observed(45_000, () => client.listTools());
   assert.ok(!listed.tools.some((tool) => tool.name === "cursor_delete_agent"));
   console.log("Policy: one repository; launch/follow-up/cancel enabled; deletion unavailable.");
 
@@ -103,10 +111,10 @@ try {
   console.log(`Follow-up: same agent; new run=${continued.structuredContent.runId}`);
 
   const beforeRefusal = requests;
-  const refused = await client.callTool({
+  const refused = await observed(45_000, () => client.callTool({
     name: "cursor_create_agent",
     arguments: { repo: "OtherOrg/OtherRepo", prompt: "Change this repository too." },
-  });
+  }));
   assert.equal(refused.isError, true);
   assert.match(refused.content[0].text, /Refused by policy/);
   assert.equal(requests, beforeRefusal);
@@ -114,6 +122,6 @@ try {
 
   console.log("Demo complete. No cloud agent or PR was created; use the quickstart for real work.");
 } finally {
-  await client.close();
-  await server.close();
+  await observed(5_000, () => client.close());
+  await observed(5_000, () => server.close());
 }

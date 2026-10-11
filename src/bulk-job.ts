@@ -25,6 +25,8 @@
  * record is gone; recovery is re-submitting the original ids.
  */
 
+import { createWaitScope, sleep, waitFor, systemClock } from "./wait.js";
+import { independently } from "./request-context.js";
 import { randomUUID } from "node:crypto";
 import type { AgentScope } from "./agent-scope.js";
 import { USAGE_LIMITED_CLASS } from "./api-errors.js";
@@ -68,25 +70,19 @@ export interface BulkItem {
 /** Time source and abortable sleep. Real timers by default; tests fake them. */
 export interface Clock {
   now(): number;
+  wallNow?(): number;
   /** Resolves true after `ms`, false if `signal` aborts first. */
   sleep(ms: number, signal?: AbortSignal): Promise<boolean>;
 }
 
 export const realClock: Clock = {
-  now: () => Date.now(),
-  sleep: (ms, signal) =>
-    new Promise((resolve) => {
-      if (signal?.aborted) return resolve(false);
-      const timer = setTimeout(() => {
-        signal?.removeEventListener("abort", onAbort);
-        resolve(true);
-      }, Math.max(0, ms));
-      const onAbort = () => {
-        clearTimeout(timer);
-        resolve(false);
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-    }),
+  now: systemClock.now, wallNow: systemClock.wallNow,
+  sleep: async (ms, signal) => {
+    const scope = createWaitScope({ timeoutMs: Math.max(ms + 1000, 1000), signal });
+    try { await sleep(scope, ms); return true; }
+    catch { return false; }
+    finally { scope.dispose(); }
+  },
 };
 
 const WINDOW_MS = 60_000;
@@ -186,6 +182,8 @@ export class BulkJob {
   readonly jobId = `bulk-${randomUUID()}`;
   readonly items: BulkItem[];
   readonly createdAt: number;
+  readonly #startedAt: number;
+  #elapsedMs: number | undefined;
   finishedAt?: number;
   state: JobState = "running";
   stopReason?: StopReason;
@@ -213,7 +211,8 @@ export class BulkJob {
     },
   ) {
     this.items = agentIds.map((agentId) => ({ agentId, state: "pending", attempts: 0 }));
-    this.createdAt = deps.clock.now();
+    this.#startedAt = deps.clock.now();
+    this.createdAt = deps.clock.wallNow?.() ?? deps.clock.now();
     this.done = new Promise((resolve) => {
       this.#resolveDone = resolve;
     });
@@ -226,11 +225,10 @@ export class BulkJob {
   /** Start the workers. Not awaited by the caller: the job outlives the request. */
   run(): void {
     const { settings, clock } = this.deps;
-    void clock
-      .sleep(settings.jobTimeoutMinutes * 60_000, this.#admission.signal)
-      .then((expired) => {
-        if (expired && !this.finished) this.#stop("timeout");
-      });
+    const lifetime = createWaitScope({ timeoutMs: settings.jobTimeoutMinutes * 60_000, signal: this.#admission.signal, clock: { now: () => clock.now(), wallNow: () => clock.wallNow?.() ?? clock.now() } });
+    void waitFor(lifetime, () => clock.sleep(settings.jobTimeoutMinutes * 60_000, lifetime.signal)).then(result => {
+      if (!this.finished && ((result.kind === "completed" && result.value) || (result.kind === "stopped" && result.reason === "deadline"))) this.#stop("timeout");
+    }).finally(() => lifetime.dispose());
     let next = 0;
     const worker = async () => {
       while (next < this.items.length) {
@@ -276,10 +274,10 @@ export class BulkJob {
     const now = clock.now();
     const cooldown: { reads?: string; writes?: string } = {};
     if (!this.finished && reads.blockedUntil > now) {
-      cooldown.reads = new Date(reads.blockedUntil).toISOString();
+      cooldown.reads = new Date((clock.wallNow?.() ?? now) + reads.blockedUntil - now).toISOString();
     }
     if (!this.finished && writes.blockedUntil > now) {
-      cooldown.writes = new Date(writes.blockedUntil).toISOString();
+      cooldown.writes = new Date((clock.wallNow?.() ?? now) + writes.blockedUntil - now).toISOString();
     }
     return {
       jobId: this.jobId,
@@ -293,7 +291,7 @@ export class BulkJob {
       ...(this.finishedAt === undefined
         ? {}
         : { finishedAt: new Date(this.finishedAt).toISOString() }),
-      elapsedMs: (this.finishedAt ?? now) - this.createdAt,
+      elapsedMs: this.#elapsedMs ?? (now - this.#startedAt),
       attempts: { reads: this.#readAttempts, writes: this.#writeAttempts, rateLimited: this.rateLimited },
       limits: {
         readsPerMinute: settings.readsPerMinute,
@@ -314,7 +312,8 @@ export class BulkJob {
   }
 
   #finish(): void {
-    this.finishedAt = this.deps.clock.now();
+    this.#elapsedMs = this.deps.clock.now() - this.#startedAt;
+    this.finishedAt = this.deps.clock.wallNow?.() ?? this.deps.clock.now();
     this.state =
       this.stopReason !== undefined
         ? "stopped"
@@ -372,7 +371,7 @@ export class BulkJob {
       const wait = this.#backoff(rateLimited, waitMs);
       window.cooldown(wait);
       item.state = "retrying";
-      item.nextAttemptAt = clock.now() + wait;
+      item.nextAttemptAt = (clock.wallNow?.() ?? clock.now()) + wait;
       return true;
     };
 
@@ -425,7 +424,7 @@ export class BulkJob {
           }
           const wait = this.#backoff(transient);
           item.state = "retrying";
-          item.nextAttemptAt = clock.now() + wait;
+          item.nextAttemptAt = (clock.wallNow?.() ?? clock.now()) + wait;
           if (!(await clock.sleep(wait, admission))) return this.#notSubmitted(item);
           continue;
         }
@@ -517,7 +516,7 @@ export class BulkJobs {
     this.#evict();
     this.#jobs.set(job.jobId, job);
     this.#active = job;
-    job.run();
+    independently(() => job.run());
     return job;
   }
 

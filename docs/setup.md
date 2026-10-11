@@ -105,6 +105,22 @@ not re-read its configuration.
 
 ## Diagnostics
 
+Setup and doctor observe one 30-second operation budget, including local file
+access and account checks. Policy loading and local environment-definition reads
+have 10-second limits. Stopping observation prevents further steps; an already
+issued filesystem write may still finish, so inspect the policy before retrying.
+
+The optional `cursorCli.timeoutMs` continues to limit each process. Set
+`cursorCli.operationTimeoutMs` to limit the complete readiness, identity, help,
+dispatch, and readback operation. Its default is
+`max(45000, 3 * timeoutMs + 2000)` milliseconds. When a write is enabled, an explicit
+value must exceed `2 * timeoutMs + 2000`, leaving preparation time; a write
+requires that reserve before dispatch. CLI observation retains partial output.
+An accepted write keeps its independent process timeout and bounded TERM/KILL
+containment when the caller cancels. A stopped observer starts no readback, reports
+an unknown write outcome, and never replays it. Increase
+`cursorCli.operationTimeoutMs` if preparation consumes the dispatch reserve.
+
 `node dist/bin.js doctor` checks policy, API access, and repository visibility
 without printing key values or account details. Look for `OK` on runtime, policy,
 credential, account, and repository checks. `INFO` rows describe launch

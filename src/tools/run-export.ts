@@ -7,6 +7,8 @@
  * contract; the comments here only say why the code looks like it does.
  */
 
+import { currentRequestScope, independently, withWaitScope } from "../request-context.js";
+import { createWaitScope, waitFor, WaitStoppedError, within, sleep as boundedSleep, delay } from "../wait.js";
 import type { FileHandle } from "node:fs/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -15,7 +17,6 @@ import { USAGE_LIMITED_CLASS } from "../api-errors.js";
 import {
   currentRequestSignal,
   CursorCancelledError,
-  pause,
   seg,
   type CursorClient,
 } from "../client.js";
@@ -51,10 +52,25 @@ import { isTerminal, RunSchema } from "../schemas.js";
 import { capBytes, sanitize } from "../untrusted.js";
 import { LOCAL_WRITE } from "./annotations.js";
 import { defineTool } from "./register.js";
-import { ok, structuredCost } from "./result.js";
+import { ok, structuredCost, type ToolResult } from "./result.js";
 
 /** Ceiling on the whole call: scope, status read, streaming, and sidecars. */
 const MAX_EXPORT_MS = 45_000;
+/** Separate bounded observation of already-owned filesystem settlement. */
+const SETTLE_MS = 2_000;
+
+interface ExportState {
+  paths: ExportPaths;
+  status: string;
+  capture?: RunCapture;
+  persisted: number;
+  attempts: number;
+  rawPublished?: boolean;
+  toolsPublished?: boolean;
+  terminalPublished?: boolean;
+  partialKept?: boolean;
+  partialCleanupFailed?: boolean;
+}
 
 /** Attempts at opening the stream, including the first. */
 const MAX_ATTEMPTS = 3;
@@ -62,7 +78,7 @@ const MAX_ATTEMPTS = 3;
 /** Waits used when a refusal carried no `Retry-After`, per attempt already made. */
 const FALLBACK_WAITS = [1_000, 3_000];
 
-/** Time kept back so publication and sidecars are not cut off by the ceiling. */
+/** Reserve used only for admitting a retry, never to shorten a capture. */
 const PUBLISH_RESERVE_MS = 5_000;
 
 /** Longest sidecar failure we echo. Ours, but a path can be long. */
@@ -89,6 +105,10 @@ export interface ExportHooks {
    */
   openRaw?: (paths: ExportPaths) => Promise<FileHandle>;
 }
+const REAL_EXPORT_TIME: ExportHooks = {
+  now: () => performance.now(),
+  sleep: delay,
+};
 
 /**
  * One export streams at a time, process-wide.
@@ -173,7 +193,7 @@ export function registerRunExportTool(
   client: CursorClient,
   policy: Policy,
   scope: AgentScope,
-  hooks: ExportHooks = { now: Date.now, sleep: (ms) => new Promise((r) => setTimeout(r, ms)) },
+  hooks: ExportHooks = REAL_EXPORT_TIME,
 ): string[] {
   const root = resolveExportRoot(policy);
   if (root === undefined) {
@@ -184,6 +204,7 @@ export function registerRunExportTool(
   }
   const registered = defineTool(server, policy, activeProfile(policy), {
     name: "cursor_export_run",
+    waitBudgetMs: null,
     config: {
       title: "Cursor Cloud: export a run's full replay",
       description:
@@ -212,13 +233,18 @@ export function registerRunExportTool(
         runningCalls: z.number(),
         terminalCommands: z.number(),
         attempts: z.number(),
-        rawPublished: z.boolean(),
-        toolsPublished: z.boolean(),
-        terminalPublished: z.boolean(),
-        partialKept: z.boolean(),
-        partialCleanupFailed: z.boolean(),
+        rawPublished: z.boolean().optional(),
+        toolsPublished: z.boolean().optional(),
+        terminalPublished: z.boolean().optional(),
+        partialKept: z.boolean().optional(),
+        partialCleanupFailed: z.boolean().optional(),
         stoppedBefore: z.string().optional(),
-        rawFile: z.string(),
+        rawFile: z.string().optional(),
+        artifactState: z.literal("unconfirmed").optional(),
+        candidateFiles: z.array(z.string()).optional(),
+        captureStopReason: z.string().optional(),
+        cleanupState: z.string().optional(),
+        observationStopReason: z.string().optional(),
         toolsFile: z.string().optional(),
         terminalFile: z.string().optional(),
         dirUnderRoot: z.string(),
@@ -227,32 +253,26 @@ export function registerRunExportTool(
       annotations: LOCAL_WRITE,
     },
     handler: async (args: { agentId: string; runId: string }) => {
-      const started = hooks.now();
-      const bound = new AbortController();
-      const timer = setTimeout(() => bound.abort(), MAX_EXPORT_MS);
       const caller = currentRequestSignal();
-      const signal = caller
-        ? AbortSignal.any([bound.signal, caller])
-        : bound.signal;
-      /**
-       * The ceiling passed, and the caller did not cancel.
-       *
-       * The clock is read as well as the timer: a long synchronous step -- a
-       * large sidecar being rendered -- can hold the loop past the deadline
-       * before the timer's callback gets to run, and a deadline that is only
-       * visible once the event loop is free is not a deadline during
-       * publication.
-       */
-      const boundHit = () =>
-        (bound.signal.aborted || hooks.now() - started >= MAX_EXPORT_MS) &&
-        caller?.aborted !== true;
+      const observation = createWaitScope({ timeoutMs: MAX_EXPORT_MS, parent: currentRequestScope(),
+        signal: currentRequestScope() ? undefined : caller, clock: { now: hooks.now, wallNow: Date.now } });
+      const signal = observation.signal;
+      const boundHit = () => observation.stopReason() === "deadline";
+      const stop = () => {
+        const reason = observation.stopReason();
+        return reason === "deadline" ? "time-limit" as const : reason === undefined ? undefined : "cancelled" as const;
+      };
+      let state: ExportState | undefined;
+      let establishedError: unknown;
+      let pipeline: Promise<ToolResult> | undefined;
+      const operation = () => (pipeline = withWaitScope(observation, async () => {
       try {
-        await scope.assert(args.agentId, { signal });
+        await within(observation, () => scope.assert(args.agentId, { signal }));
         const path = `/v1/agents/${seg(args.agentId)}/runs/${seg(args.runId)}`;
         // Terminal state and identity come from REST, before a byte is written.
         // The stream's own `status` event is observed to report FINISHED for a run
         // REST calls CANCELLED, so it can never gate an export.
-        const run = await client.get(path, RunSchema, { signal });
+        const run = await within(observation, () => client.get(path, RunSchema, { signal }));
         if (run.id !== args.runId || run.agentId !== args.agentId) {
           throw new CursorContractError(
             `refusing to export: ${path} answered for a different run or agent`,
@@ -266,15 +286,21 @@ export function registerRunExportTool(
         }
         const paths = exportPaths(root, args.agentId, args.runId);
         assertReportable(paths, policy, run.status);
+        state = { paths, status: run.status, persisted: 0, attempts: 0 };
+        observation.throwIfStopped();
         await assertNotExported(paths);
+        state.rawPublished = false;
+        observation.throwIfStopped();
         const releaseSlot = await (hooks.gate ?? exportGate).acquire(signal);
         // The slot is released by the `finally` below, which only exists once the
         // partial is open. A refusal here has to hand it back itself, or every
         // later export in this process waits on a capture that never started.
-        const handle = await (hooks.openRaw ?? openPartial)(paths).catch((error: unknown) => {
-          releaseSlot();
-          throw error;
-        });
+        let handle: FileHandle;
+        try {
+          observation.throwIfStopped();
+          handle = await (hooks.openRaw ? hooks.openRaw(paths) : openPartial(paths, stop));
+        } catch (error) { releaseSlot(); throw error; }
+        const pendingWrites = new Set<Promise<unknown>>();
         let capture: RunCapture | undefined;
         // What reached the file, not what the parser accounted for, and counted
         // per successful write rather than per whole chunk: a chunk that
@@ -289,21 +315,29 @@ export function registerRunExportTool(
         const closeRaw = async () => {
           if (closed) return;
           closed = true;
+          await Promise.allSettled([...pendingWrites]);
           await handle.close();
         };
         try {
           let attempts = 0;
           for (;;) {
+            observation.throwIfStopped();
             attempts += 1;
+            state!.attempts = attempts;
             try {
-              const response = await client.openRunStream(`${path}/stream`, { signal });
+              const response = await within(observation, () => client.openRunStream(`${path}/stream`, { signal })
+                .then(opened => { if (observation.stopReason() !== undefined) void opened.body?.cancel().catch(() => {}); return opened; }));
               capture = await captureRunStream(response, {
                 signal,
+                scope: observation,
                 write: async (chunk) => {
                   try {
-                    await writeFully(handle, chunk, (bytes) => {
+                    const writing = writeFully(handle, chunk, (bytes) => {
                       persisted += bytes;
-                    });
+                      state!.persisted = persisted;
+                    }, stop);
+                    pendingWrites.add(writing);
+                    try { await writing; } finally { pendingWrites.delete(writing); }
                   } catch (error) {
                     // A rejected write never says how much of its buffer landed,
                     // so from here on the counter is a floor, not a total.
@@ -312,6 +346,7 @@ export function registerRunExportTool(
                   }
                 },
               });
+              state!.capture = capture;
               break;
             } catch (error) {
               if (error instanceof CursorApiError && error.classification === USAGE_LIMITED_CLASS) {
@@ -325,7 +360,7 @@ export function registerRunExportTool(
               const wait = attempts >= MAX_ATTEMPTS ? undefined : retryDelay(error, attempts - 1);
               if (wait === undefined) throw error;
               const remaining =
-                MAX_EXPORT_MS - (hooks.now() - started) - PUBLISH_RESERVE_MS;
+                observation.remainingMs() - PUBLISH_RESERVE_MS;
               if (wait > remaining) {
                 // Better to report the wait than to retry earlier than the server
                 // asked, or to be cut off mid-capture by the ceiling.
@@ -335,15 +370,16 @@ export function registerRunExportTool(
                 );
               }
               log.debug(`run export retry ${attempts} in ${wait}ms`);
-              await pause(wait, signal, hooks.sleep);
+              if (hooks === REAL_EXPORT_TIME) await boundedSleep(observation, wait);
+              else await within(observation, () => hooks.sleep(wait));
             }
           }
-          if (caller?.aborted) {
+          if (observation.stopReason() !== undefined && observation.stopReason() !== "deadline") {
             throw new CursorCancelledError(
               "Run export cancelled; the cloud run was not cancelled and nothing was published",
             );
           }
-          if (boundHit()) capture.stopReason = "time-limit";
+          if (boundHit() && capture.stopReason === "cancelled") capture.stopReason = "time-limit";
           // Before publication, not after it. Bytes still sitting in the handle
           // are not in the file, and a `link` does not flush them: closing here
           // is what makes "published" mean the final name holds the capture.
@@ -354,6 +390,9 @@ export function registerRunExportTool(
           // rather than lowering it to zero.
           const onDisk = await partialBytes(paths);
           if (onDisk !== undefined && onDisk > persisted) persisted = onDisk;
+          // Pending writes/close may still leave an empty file for cleanup to remove.
+          // A settled positive count proves that this partial will be retained.
+          if (persisted > 0) state!.partialKept = true;
           // Known-empty and unknown are different answers, and only one of them
           // means nothing was written. A write that rejected without confirming
           // its progress, over a file whose size cannot be read, leaves a
@@ -369,14 +408,17 @@ export function registerRunExportTool(
             persisted,
             persistedUnknown,
             status: run.status,
-            exportedAt: new Date(hooks.now()).toISOString(),
+            exportedAt: new Date().toISOString(),
             // Checked between filesystem operations, which is the only place a
             // check can be: no `link` or `write` here takes a signal, so this
             // stops the *next* step rather than interrupting one in flight.
-            stop: () => (caller?.aborted ? "cancelled" : boundHit() ? "time-limit" : undefined),
+            stop,
+            state: state!,
           });
+        } catch (error) {
+          if (!(error instanceof WaitStoppedError)) establishedError = error;
+          throw error;
         } finally {
-          releaseSlot();
           await closeRaw().catch((error: unknown) => {
             log.debug(
               `could not close the export partial: ${error instanceof Error ? error.message : String(error)}`,
@@ -387,14 +429,54 @@ export function registerRunExportTool(
           // failed, which the capture's own counter never got to see. The
           // counter only decides whether to look; `discardEmptyPartial` reads
           // the file's own size and keeps anything it cannot confirm empty.
-          if (persisted === 0) await discardEmptyPartial(paths);
+          if (persisted === 0) {
+            delete state!.partialKept;
+            const removed = await discardEmptyPartial(paths);
+            state!.partialKept = !removed;
+            state!.partialCleanupFailed = !removed;
+          }
+          releaseSlot();
         }
-      } finally {
-        clearTimeout(timer);
+      } catch (error) {
+        if (!(error instanceof WaitStoppedError)) establishedError = error;
+        throw error;
       }
+      }));
+      const outcome = await waitFor(observation, operation);
+      observation.dispose();
+      if (outcome.kind === "completed") return outcome.value;
+      if (outcome.kind === "failed") throw outcome.error;
+      if (pipeline !== undefined) {
+        const settlement = createWaitScope({ timeoutMs: SETTLE_MS });
+        try {
+          const settled = await independently(() => waitFor(settlement, () => pipeline!));
+          if (settled.kind === "completed") return settled.value;
+          if (settled.kind === "failed") {
+            if (settled.error instanceof WaitStoppedError) throw exportObservationError(settled.error.reason);
+            throw settled.error;
+          }
+        } finally { settlement.dispose(); }
+      }
+      if (establishedError !== undefined) throw establishedError;
+      if (state === undefined) throw exportObservationError(outcome.reason);
+      return unconfirmedReport(args, state, policy, outcome.reason);
     },
   });
   return registered ? ["cursor_export_run"] : [];
+}
+
+function exportObservationError(reason: string): Error {
+  const message = `Run export observation ${reason === "deadline" ? "reached its deadline" : reason === "shutdown" ? "stopped because the server shut down" : "was cancelled by the caller"}; the cloud run was not cancelled.`;
+  return reason === "deadline" ? new CursorTransportError(message) : new CursorCancelledError(message);
+}
+
+function candidateFiles(state: ExportState): string[] {
+  return [
+    ...(state.partialKept === false ? [] : [state.paths.names.partial]),
+    ...(state.rawPublished === undefined ? [state.paths.names.raw] : []),
+    ...(state.toolsPublished === undefined ? [state.paths.names.tools] : []),
+    ...(state.terminalPublished === undefined ? [state.paths.names.terminal] : []),
+  ];
 }
 
 /**
@@ -404,6 +486,41 @@ export function registerRunExportTool(
  * whole and the failure is a separate fact, so both are reported and overall
  * `complete` is false.
  */
+function unconfirmedReport(
+  args: { agentId: string; runId: string },
+  state: ExportState,
+  policy: Policy,
+  reason: string,
+) {
+  const capture = state.capture;
+  const totals = callTotals(capture?.calls ?? []);
+  return ok({ source: `run export ${args.agentId}/${args.runId}`, policy,
+    text: `Export observation stopped (${reason}). Artifact publication and cleanup are unconfirmed. ` +
+      "An in-flight filesystem operation may settle later; inspect the candidate paths before retrying.",
+    structured: {
+      complete: false, rawComplete: capture?.complete ?? false,
+      stopReason: capture?.stopReason ?? (reason === "deadline" ? "time-limit" : "cancelled"),
+      ...(capture === undefined ? {} : { captureStopReason: capture.stopReason }),
+      observationStopReason: reason, artifactState: "unconfirmed", cleanupState: "unconfirmed",
+      candidateFiles: candidateFiles(state),
+      dirUnderRoot: state.paths.dirUnderRoot, status: state.status, terminal: isTerminal(state.status),
+      bytes: capture?.bytes ?? 0, persistedBytes: state.persisted, persistedBytesUnknown: true,
+      events: capture?.events ?? 0, trailingEvents: capture?.trailingEvents ?? 0, trailingBytes: capture?.trailingBytes ?? 0,
+      toolCallEvents: capture?.toolCallEvents ?? 0, unparsedToolCalls: capture?.unparsedToolCalls ?? 0,
+      toolCalls: totals.calls, completedCalls: totals.completed, runningCalls: totals.running,
+      terminalCommands: capture?.terminal.length ?? 0, attempts: state.attempts,
+      ...(state.rawPublished === undefined ? {} : { rawPublished: state.rawPublished }),
+      ...(state.toolsPublished === undefined ? {} : { toolsPublished: state.toolsPublished }),
+      ...(state.terminalPublished === undefined ? {} : { terminalPublished: state.terminalPublished }),
+      ...(state.partialKept === undefined ? {} : { partialKept: state.partialKept }),
+      ...(state.partialCleanupFailed === undefined ? {} : { partialCleanupFailed: state.partialCleanupFailed }),
+      ...(state.rawPublished === true ? { rawFile: state.paths.names.raw } : {}),
+      ...(state.toolsPublished === true ? { toolsFile: state.paths.names.tools } : {}),
+      ...(state.terminalPublished === true ? { terminalFile: state.paths.names.terminal } : {}),
+    },
+  });
+}
+
 async function report(args: {
   args: { agentId: string; runId: string };
   capture: RunCapture;
@@ -420,6 +537,7 @@ async function report(args: {
   status: string;
   exportedAt: string;
   stop: () => "cancelled" | "time-limit" | undefined;
+  state: ExportState;
 }) {
   const { capture, paths } = args;
   const totals = callTotals(capture.calls);
@@ -434,9 +552,18 @@ async function report(args: {
   // interruptible, so each step is gated on the state before it starts.
   let stopped = args.stop();
   if (capture.complete && stopped === undefined) {
-    const published = await publishRaw(paths);
+    delete args.state.rawPublished;
+    delete args.state.partialKept;
+    const published = await publishRaw(paths, args.stop, fact => {
+      args.state.rawPublished = fact.linked;
+      if (fact.partialRemoved === undefined) delete args.state.partialKept;
+      else args.state.partialKept = !fact.partialRemoved;
+    });
     rawPublished = published.linked;
     partialCleanupError = published.detail;
+    args.state.rawPublished = rawPublished;
+    args.state.partialKept = !published.partialRemoved;
+    args.state.partialCleanupFailed = published.detail !== undefined;
     const derived = {
       agentId: args.args.agentId,
       runId: args.args.runId,
@@ -455,9 +582,14 @@ async function report(args: {
         // The probe goes into the helper too: checking only here left the whole
         // write-and-close of a large sidecar unguarded, and a cancellation
         // during it was followed by a `link` that called the export finished.
-        const written = await writeSidecar(sidecar.path, sidecar.content(), args.stop);
+        const written = await writeSidecar(sidecar.path, sidecar.content(), args.stop, fact => {
+          if (index === 0) args.state.toolsPublished = fact.linked;
+          else args.state.terminalPublished = fact.linked;
+        });
         if (index === 0) toolsPublished = written.linked;
         else terminalPublished = written.linked;
+        if (index === 0) args.state.toolsPublished = written.linked;
+        else args.state.terminalPublished = written.linked;
         if (written.detail !== undefined) sidecarError = written.detail;
       } catch (error) {
         // Absent, never half-written: a sidecar is built in its own partial and
@@ -607,7 +739,36 @@ export function worstCaseReport(paths: ExportPaths, status: string): Record<stri
  * every value in it is known before the stream is opened.
  */
 function assertReportable(paths: ExportPaths, policy: Policy, status: string): void {
-  const cost = structuredCost(worstCaseReport(paths, status));
+  const known = worstCaseReport(paths, status);
+  const unconfirmed = { ...known };
+  for (const key of ["rawPublished", "toolsPublished", "terminalPublished", "partialKept", "partialCleanupFailed", "rawFile", "toolsFile", "terminalFile", "sidecarError", "stoppedBefore"]) delete unconfirmed[key];
+  Object.assign(unconfirmed, {
+    artifactState: "unconfirmed", cleanupState: "unconfirmed", observationStopReason: "caller_cancelled",
+    captureStopReason: known.stopReason,
+    candidateFiles: [paths.names.partial, paths.names.raw, paths.names.tools, paths.names.terminal],
+  });
+  const fallbackStates: ExportState[] = [
+    { paths, status, persisted: WIDEST_COUNT, attempts: WIDEST_COUNT },
+    { paths, status, persisted: WIDEST_COUNT, attempts: WIDEST_COUNT, rawPublished: false, partialKept: true },
+    { paths, status, persisted: WIDEST_COUNT, attempts: WIDEST_COUNT, rawPublished: true },
+    { paths, status, persisted: WIDEST_COUNT, attempts: WIDEST_COUNT, rawPublished: true, partialKept: false, partialCleanupFailed: false },
+    { paths, status, persisted: WIDEST_COUNT, attempts: WIDEST_COUNT, rawPublished: true, partialKept: false, partialCleanupFailed: false, toolsPublished: true },
+    { paths, status, persisted: WIDEST_COUNT, attempts: WIDEST_COUNT, rawPublished: true, partialKept: false, partialCleanupFailed: false, toolsPublished: true, terminalPublished: true },
+  ];
+  const cleanupResidues = fallbackStates.filter(state => state.partialKept === false)
+    .map(state => ({ ...state, partialKept: true, partialCleanupFailed: true }));
+  const fallbackCosts = [...fallbackStates, ...cleanupResidues].map(state => structuredCost({
+    ...unconfirmed, candidateFiles: candidateFiles(state),
+    ...(state.rawPublished === undefined ? {} : { rawPublished: state.rawPublished }),
+    ...(state.toolsPublished === undefined ? {} : { toolsPublished: state.toolsPublished }),
+    ...(state.terminalPublished === undefined ? {} : { terminalPublished: state.terminalPublished }),
+    ...(state.partialKept === undefined ? {} : { partialKept: state.partialKept }),
+    ...(state.partialCleanupFailed === undefined ? {} : { partialCleanupFailed: state.partialCleanupFailed }),
+    ...(state.rawPublished === true ? { rawFile: paths.names.raw } : {}),
+    ...(state.toolsPublished === true ? { toolsFile: paths.names.tools } : {}),
+    ...(state.terminalPublished === true ? { terminalFile: paths.names.terminal } : {}),
+  }));
+  const cost = Math.max(structuredCost(known), ...fallbackCosts);
   if (cost > policy.maxResponseBytes) {
     throw new PolicyError(
       `refusing to export: reporting this export needs up to ${cost} bytes of ` +

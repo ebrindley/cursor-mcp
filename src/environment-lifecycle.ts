@@ -20,6 +20,8 @@
  * never by running the planner and presenting its output as an execution result.
  */
 
+import { createWaitScope, within, WaitStoppedError, systemClock, type WaitScope } from "./wait.js";
+import { currentRequestScope, currentRequestSignal, withWaitScope, independently } from "./request-context.js";
 import {
   buildSynchronizationRequest,
   validateDefinition,
@@ -251,7 +253,10 @@ export interface LifecycleRequest {
 }
 
 export interface LifecycleOperations {
+  /** Wall clock for public timestamps. */
   now(): number;
+  /** Monotonic elapsed clock; injectable independently of public dates. */
+  elapsedNow?(): number;
   inspect(input: {
     environment: string;
     environmentPublicId: string;
@@ -731,7 +736,7 @@ export async function runEnvironmentLifecycle(
   const intent = request.intent ?? "lifecycle";
   const startedAtMs = ops.now();
   const timeoutMs = clampTimeoutMs(request.timeoutMs);
-  const deadline = startedAtMs + timeoutMs;
+
 
   if (request.dryRun === true) {
     return planEnvironmentLifecycle(request, () => ops.now());
@@ -768,11 +773,33 @@ export async function runEnvironmentLifecycle(
     };
   }
 
+  const scope = createWaitScope({ timeoutMs, parent: currentRequestScope(), signal: request.signal ?? (currentRequestScope() ? undefined : currentRequestSignal()), clock: { now: ops.elapsedNow ?? systemClock.now, wallNow: () => ops.now() } });
+  const scopedOps: LifecycleOperations = {
+    ...ops,
+    inspect: input => within(scope, () => withWaitScope(scope, () => ops.inspect(input))),
+    validate: input => within(scope, () => withWaitScope(scope, () => ops.validate(input))),
+    synchronize: input => within(scope, () => withWaitScope(scope, () => ops.synchronize(input))),
+    trigger: input => within(scope, () => withWaitScope(scope, () => ops.trigger(input).then(outcome => {
+      if (outcome.kind === "attributed" && outcome.attribution.status === "ADOPTED" && outcome.attribution.buildId !== undefined) {
+        run.newBuildId = outcome.attribution.buildId;
+        if (run.observationEnded && scope.stopReason() === "caller_cancelled") void abortWithCancel(run).catch(() => {});
+      }
+      return outcome;
+    }))),
+    monitor: input => within(scope, () => withWaitScope(scope, () => ops.monitor(input))),
+    qualify: input => within(scope, () => withWaitScope(scope, () => ops.qualify(input))),
+    activate: input => within(scope, () => withWaitScope(scope, () => ops.activate(input))),
+    cancel: input => within(scope, () => withWaitScope(scope, () => ops.cancel(input))),
+    rollback: input => within(scope, () => withWaitScope(scope, () => ops.rollback(input))),
+    launch: input => within(scope, () => withWaitScope(scope, () => ops.launch(input))),
+  };
   const run: RunState = {
     request,
     intent,
-    ops,
-    deadline,
+    ops: scopedOps,
+    rawOps: ops,
+    scope,
+    startedElapsed: scope.clock.now(),
     startedAtMs,
     steps: [],
     manualActions: [],
@@ -786,17 +813,32 @@ export async function runEnvironmentLifecycle(
     if (intent === "rollback") return await runRollback(run);
     return await runLifecycle(run);
   } catch (error) {
-    if (error instanceof WorkflowAborted) return await abortWithCancel(run);
+    if (error instanceof WorkflowAborted || (error instanceof WaitStoppedError && error.reason !== "deadline")) {
+      await Promise.resolve();
+      return await abortWithCancel(run);
+    }
+    if (error instanceof WaitStoppedError) {
+      const step = run.activeStep ?? "inspect";
+      record(run, step, "timed_out", { reason: "Observation deadline reached; accepted work may still complete. Reconcile before retrying." });
+      run.stoppedAt = step;
+      return finish(run, "TIMED_OUT");
+    }
     if (error instanceof WorkflowHalt) return finish(run, error.status);
     throw error;
-  }
+  } finally { run.observationEnded = true; scope.dispose(); }
 }
 
 interface RunState {
   request: LifecycleRequest;
   intent: WorkflowIntent;
   ops: LifecycleOperations;
-  deadline: number;
+  observationEnded?: boolean;
+  containmentStarted?: boolean;
+  rawOps: LifecycleOperations;
+  scope: WaitScope;
+  startedElapsed: number;
+  stepStartedElapsed?: number;
+  activeStep?: WorkflowStepName;
   startedAtMs: number;
   steps: WorkflowStep[];
   manualActions: string[];
@@ -856,13 +898,19 @@ async function runLifecycle(run: RunState): Promise<WorkflowResult> {
 
 async function abortWithCancel(run: RunState): Promise<WorkflowResult> {
   const buildId = run.newBuildId;
-  if (buildId !== undefined) {
-    const started = run.ops.now();
+  if (buildId !== undefined && !run.containmentStarted) {
+    run.containmentStarted = true;
+    const started = startStep(run);
     run.executed = true;
-    const residual = await run.ops.cancel({
-      environmentPublicId: run.request.environmentPublicId,
-      buildId,
-    });
+    const cleanup = createWaitScope({ timeoutMs: 30_000 });
+    let residual: OwnerActionResidual;
+    try {
+      residual = await independently(() => within(cleanup, () => withWaitScope(cleanup, () => run.rawOps.cancel({ environmentPublicId: run.request.environmentPublicId, buildId }))));
+    } catch {
+      record(run, "cancel", "failed", { startedAtMs: started, reason: "Cancellation cleanup was not confirmed; reconcile the existing Build before retrying." });
+      run.stoppedAt = "cancel";
+      return finish(run, "STOPPED");
+    } finally { cleanup.dispose(); }
     record(run, "cancel", "unsupported", {
       startedAtMs: started,
       reason: residual.reason,
@@ -898,7 +946,7 @@ async function runCancel(run: RunState): Promise<WorkflowResult> {
   }
   assertNotCancelled(run);
   assertTime(run, "cancel");
-  const started = run.ops.now();
+  const started = startStep(run);
   run.executed = true;
   const residual = await run.ops.cancel({
     environmentPublicId: run.request.environmentPublicId,
@@ -935,7 +983,7 @@ async function runRollback(run: RunState): Promise<WorkflowResult> {
   }
   assertNotCancelled(run);
   assertTime(run, "rollback");
-  const started = run.ops.now();
+  const started = startStep(run);
   run.executed = true;
   const outcome = await run.ops.rollback({
     environmentPublicId: run.request.environmentPublicId,
@@ -964,7 +1012,7 @@ async function runRollback(run: RunState): Promise<WorkflowResult> {
 async function stepInspect(run: RunState): Promise<InspectOutcome> {
   assertNotCancelled(run);
   assertTime(run, "inspect");
-  const started = run.ops.now();
+  const started = startStep(run);
   run.executed = true;
   const outcome = await run.ops.inspect({
     environment: run.request.environment,
@@ -1020,7 +1068,7 @@ async function stepValidate(run: RunState): Promise<EnvironmentDefinition | unde
   }
   assertNotCancelled(run);
   assertTime(run, "validate");
-  const started = run.ops.now();
+  const started = startStep(run);
   run.executed = true;
   const result = await run.ops.validate({
     text,
@@ -1056,7 +1104,7 @@ async function stepSynchronize(
   }
   assertNotCancelled(run);
   assertTime(run, "synchronize");
-  const started = run.ops.now();
+  const started = startStep(run);
   run.executed = true;
   const outcome = await run.ops.synchronize({
     environmentPublicId: run.request.environmentPublicId,
@@ -1105,7 +1153,7 @@ async function stepBuild(run: RunState): Promise<string | undefined> {
   }
   assertNotCancelled(run);
   assertTime(run, "build");
-  const started = run.ops.now();
+  const started = startStep(run);
   run.executed = true;
   const outcome = await run.ops.trigger({
     environment: run.request.environment,
@@ -1178,7 +1226,7 @@ async function stepMonitor(
 ): Promise<MonitorResult | undefined> {
   assertNotCancelled(run);
   assertTime(run, "monitor");
-  const started = run.ops.now();
+  const started = startStep(run);
   run.executed = true;
   const outcome = await run.ops.monitor({
     environment: run.request.environment,
@@ -1256,7 +1304,7 @@ async function stepMonitor(
 async function stepQualify(run: RunState): Promise<boolean> {
   assertNotCancelled(run);
   assertTime(run, "qualify");
-  const started = run.ops.now();
+  const started = startStep(run);
   run.executed = true;
   const outcome = await run.ops.qualify({
     environment: run.request.environment,
@@ -1330,7 +1378,7 @@ async function stepActivate(run: RunState, monitor: MonitorResult): Promise<bool
   };
   assertNotCancelled(run);
   assertTime(run, "activate");
-  const started = run.ops.now();
+  const started = startStep(run);
   run.executed = true;
   const outcome = await run.ops.activate({
     environmentPublicId: run.request.environmentPublicId,
@@ -1365,7 +1413,7 @@ async function stepActivate(run: RunState, monitor: MonitorResult): Promise<bool
 async function stepVerify(run: RunState): Promise<void> {
   assertNotCancelled(run);
   assertTime(run, "verify");
-  const started = run.ops.now();
+  const started = startStep(run);
   run.executed = true;
   const outcome = await run.ops.inspect({
     environment: run.request.environment,
@@ -1432,7 +1480,7 @@ async function stepWarmLaunches(run: RunState): Promise<void> {
   for (let index = 0; index < count; index += 1) {
     assertNotCancelled(run);
     assertTime(run, "warm-launch");
-    const started = run.ops.now();
+    const started = startStep(run);
     run.executed = true;
     const launched = await run.ops.launch({
       environment: run.request.environment,
@@ -1454,6 +1502,11 @@ async function stepWarmLaunches(run: RunState): Promise<void> {
   }
 }
 
+function startStep(run: RunState): number {
+  run.stepStartedElapsed = run.scope.clock.now();
+  return run.ops.now();
+}
+
 function record(
   run: RunState,
   step: WorkflowStepName,
@@ -1472,7 +1525,7 @@ function record(
     status,
     startedAtMs,
     endedAtMs,
-    durationMs: Math.max(0, endedAtMs - startedAtMs),
+    durationMs: extra.startedAtMs === undefined ? 0 : Math.max(0, run.scope.clock.now() - (run.stepStartedElapsed ?? run.scope.clock.now())),
   };
   if (extra.reason !== undefined) entry.reason = extra.reason;
   if (extra.residual !== undefined) entry.residual = extra.residual;
@@ -1493,10 +1546,11 @@ function adoptResidual(run: RunState, residual: OwnerActionResidual): void {
 }
 
 function remainingMs(run: RunState): number {
-  return Math.max(0, run.deadline - run.ops.now());
+  return run.scope.remainingMs();
 }
 
 function assertTime(run: RunState, step: WorkflowStepName): void {
+  run.activeStep = step;
   if (remainingMs(run) > 0) return;
   record(run, step, "timed_out", {
     reason: `No time remained for ${step} inside the workflow timeout.`,
@@ -1535,7 +1589,7 @@ function finish(run: RunState, status: WorkflowStatus): WorkflowResult {
     timings: {
       startedAtMs: run.startedAtMs,
       endedAtMs,
-      durationMs: Math.max(0, endedAtMs - run.startedAtMs),
+      durationMs: Math.max(0, run.scope.clock.now() - run.startedElapsed),
     },
     rollbackTarget: run.rollbackTarget,
     manualActions: run.manualActions,

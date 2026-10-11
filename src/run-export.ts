@@ -19,6 +19,8 @@
  */
 
 import { SseParser, type SseEvent } from "./sse.js";
+import { currentRequestScope } from "./request-context.js";
+import { createWaitScope, WaitStoppedError, within, type WaitScope } from "./wait.js";
 
 /**
  * Ceiling on one export.
@@ -110,6 +112,7 @@ export interface CaptureOptions {
   /** Persist one chunk. Rejecting stops the export without publishing anything. */
   write: (chunk: Uint8Array) => Promise<void>;
   signal: AbortSignal;
+  scope?: WaitScope;
   maxBytes?: number;
 }
 
@@ -127,6 +130,7 @@ export async function captureRunStream(
 ): Promise<RunCapture> {
   const body = response.body;
   if (body === null) throw new Error("Run stream has no response body");
+  const observation = options.scope ?? createWaitScope({ timeoutMs: 45_000, parent: currentRequestScope(), signal: options.signal });
   const maxBytes = options.maxBytes ?? MAX_EXPORT_BYTES;
   const reader = body.getReader();
   const parser = new SseParser();
@@ -175,16 +179,16 @@ export async function captureRunStream(
 
   try {
     while (!stopped && !options.signal.aborted) {
-      const { done: eof, value } = await reader.read();
+      const { done: eof, value } = await within(observation, () => reader.read());
       if (options.signal.aborted) break;
       if (eof) break;
       const room = maxBytes - capture.bytes;
       const clipped = value.byteLength > room;
       const chunk = clipped ? value.subarray(0, room) : value;
       try {
-        await options.write(chunk);
+        await within(observation, () => options.write(chunk));
       } catch (error) {
-        capture.stopReason = "write-failed";
+        capture.stopReason = error instanceof WaitStoppedError ? (error.reason === "deadline" ? "time-limit" : "cancelled") : "write-failed";
         capture.detail = error instanceof Error ? error.name : "write failed";
         return finish();
       }
@@ -229,17 +233,17 @@ export async function captureRunStream(
       capture.complete = true;
     }
     return finish();
-  } catch {
+  } catch (error) {
     // A failed read is an incomplete capture, not an exception the tool has to
     // translate. The bytes already written are still on disk and still reported.
-    capture.stopReason = options.signal.aborted ? "cancelled" : "eof-before-done";
+    capture.stopReason = error instanceof WaitStoppedError ? (error.reason === "deadline" ? "time-limit" : "cancelled") : options.signal.aborted ? "cancelled" : "eof-before-done";
     return finish();
   } finally {
     options.signal.removeEventListener("abort", onAbort);
     // Explicit cancel releases the connection. Abandoning the reader leaves the
     // server generating events long after the client has stopped reading.
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
+    void reader.cancel().catch(() => {}).finally(() => { try { reader.releaseLock(); } catch {} });
+    if (options.scope === undefined) observation.dispose();
   }
 
   function finish(): RunCapture {

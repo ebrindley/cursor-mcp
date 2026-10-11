@@ -5,12 +5,22 @@ import { describe, expect, it, vi } from "vitest";
 import { doctor, runSetupCommand, setup } from "../src/setup.js";
 import { resolveAutoCreatePR, resolveCreateAgentLaunch, assertAgentAccess, assertEnvironmentIdentity, resolveEnvironmentBinding } from "../src/policy.js";
 import { loadPolicy } from "../src/config.js";
+import { createWaitScope } from "../src/wait.js";
+import { withWaitScope } from "../src/request-context.js";
 
 const key = "dummy-private-marker-not-real";
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 async function destination() { return join(await mkdtemp(join(tmpdir(), "cursor-setup-")), "policy.json"); }
 
 describe("human setup", () => {
+  it("does not create a policy after the caller scope has stopped", async () => {
+    const path = await destination();
+    const scope = createWaitScope({ timeoutMs: 0 });
+    try {
+      await expect(withWaitScope(scope, () => setup("O/R", path))).rejects.toMatchObject({ reason: "deadline" });
+      await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { scope.dispose(); }
+  });
   it("creates the shipped everyday policy with one normalized repo and private permissions", async () => {
     const path = await destination();
     await setup("ExampleOrg/ExampleRepo", path);

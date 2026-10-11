@@ -23,6 +23,8 @@ import {
   type DelegationHandle,
 } from "../src/delegated-run.js";
 import { CursorContractError, PolicyError } from "../src/errors.js";
+import { createWaitScope } from "../src/wait.js";
+import { withWaitScope } from "../src/request-context.js";
 
 const ENV_NAME = "example-environment";
 const REPO = "https://github.com/ExampleOrg/ExampleRepo";
@@ -136,6 +138,24 @@ const handle: DelegationHandle = {
   environment: ENV_NAME,
   mission: "inspect",
 };
+
+it("retains a pending handle when admission lookup ignores cancellation", async () => {
+  const observation = createWaitScope({ timeoutMs: 10 });
+  const outcome = await withWaitScope(observation, () => runner(policy({}), async () => new Promise<Response>(() => {}))
+    .collect({ handle, waitMs: 0 }));
+  observation.dispose();
+  expect(outcome).toMatchObject({ state: "pending", handle, stopReason: "deadline" });
+  expect(outcome).not.toHaveProperty("runStatus");
+});
+
+it("describes a stopped delegated launch as unknown after POST admission", async () => {
+  const observation = createWaitScope({ timeoutMs: 10 });
+  try {
+    await expect(withWaitScope(observation, () => runner(policy({}), async () => new Promise<Response>(() => {}))
+      .start({ environment: ENV_NAME, request: { mission: "inspect" } })))
+      .rejects.toThrow("the launch outcome is unknown; inspect cursor_list_agents before retrying");
+  } finally { observation.dispose(); }
+});
 
 describe("launching a delegate", () => {
   it("refuses an environment the profile does not name", async () => {
