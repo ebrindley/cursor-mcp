@@ -414,6 +414,19 @@ describe("cursor_refresh_environment_toolchain", () => {
     );
   });
 
+  it("preserves the unknown outcome when the refresh delegation fails", async () => {
+    const { runner, starts } = fake((handle) => ({
+      state: "failed", handle, runStatus: "ERROR", reason: "delegate failed after launch",
+    }));
+    const result = await invoke(WRITE, runner, "cursor_refresh_environment_toolchain", {
+      environment: ENV_NAME, ...DRIFTED_ARGS, confirm: true, waitMs: 1,
+    });
+    expect(starts).toHaveLength(1);
+    expect(result.structured.status).toBe("NOT_ACCEPTED_UNKNOWN");
+    expect(result.structured.delegation).toMatchObject({ agentId: "bc-1", runId: "run-1" });
+    expect(JSON.stringify(result.structured)).toContain("Do not trigger another Build");
+  });
+
   it("fails closed when an adopted trigger does not prove draft status", async () => {
     const { runner, starts } = reporting({
       ...TRIGGER_REPORT,

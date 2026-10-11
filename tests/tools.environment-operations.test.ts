@@ -519,6 +519,23 @@ describe("cursor_get_build_logs", () => {
 });
 
 describe("cursor_trigger_build", () => {
+  it.each(["failed", "unparseable", "wrong-mission"] as const)("preserves the unknown write outcome after a %s delegation", async (failure) => {
+    const { runner, starts } = fake((handle) => failure === "failed"
+      ? { state: "failed", handle, runStatus: "ERROR", reason: "delegate failed after launch" }
+      : { state: "complete", handle, runStatus: "FINISHED", text: failure === "unparseable"
+          ? "no usable report"
+          : `${REPORT_OPEN}\n${JSON.stringify({ mission: "list-builds" })}\n${REPORT_CLOSE}` });
+    const result = await invoke(WRITE, runner, "cursor_trigger_build", {
+      environment: ENV_NAME, environmentPublicId: ENV_ID, confirm: true,
+    });
+    expect(starts).toHaveLength(1);
+    expect(result.structured.status).toBe("NOT_ACCEPTED_UNKNOWN");
+    expect(result.structured.delegation).toMatchObject({ agentId: "bc-1", runId: "run-1" });
+    expect(result.structured).not.toHaveProperty("build");
+    expect(JSON.stringify(result.structured)).toContain("Do not trigger another Build");
+    expect(result.text).toContain("outcome is unknown");
+  });
+
   it("adopts the returned buildId and reads its row back independently", async () => {
     const { runner, starts } = reporting({
       mission: "trigger-build",

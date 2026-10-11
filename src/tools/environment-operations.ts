@@ -494,6 +494,24 @@ export function delegationResult(
       policy,
     });
   }
+  if (delegation.mission === "trigger-build") {
+    const reason = `The Build write outcome is unknown: ${collected.reason}`;
+    const nextSteps = [
+      "Read the Build list and reconcile exact identifiers before acting.",
+      "Do not trigger another Build: trigger-environment-build has no idempotency key, so a second call is a second write.",
+    ];
+    return ok({
+      source: `delegated run ${delegation.runId}`,
+      text: [reason, ...nextSteps].join("\n"),
+      structured: {
+        status: "NOT_ACCEPTED_UNKNOWN",
+        delegation: { ...delegation },
+        evidence: { ...EVIDENCE, reason },
+        nextSteps,
+      },
+      policy,
+    });
+  }
   return ok({
     source: `delegated run ${delegation.runId}`,
     text: `delegation failed  run=${delegation.runId}: ${collected.reason}`,
