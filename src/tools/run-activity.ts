@@ -70,7 +70,8 @@ export function registerRunActivityTool(server: McpServer, client: CursorClient,
           source: `run activity ${args.agentId}/${args.runId}`, policy,
           text: `${status === undefined ? "Run status unverified; use cursor_get_run." : `REST run status: ${status}.`}\n` +
             `Activity: ${tail.stopReason}; ${tail.truncated ? "incomplete or clipped excerpt" : "stream done"}.\n` +
-            (tail.lastEventId ? "Pass lastEventId back to continue.\n" : "No resume cursor; another tail starts a replay.\n") + text,
+            (tail.done && !tail.truncated ? "" : tail.lastEventId
+              ? "Pass lastEventId back to continue.\n" : "No resume cursor; another tail starts a replay.\n") + text,
           structured: { ...metadata, replayRequired: tail.lastEventId === undefined, statusVerified: status !== undefined,
             ...(status === undefined ? {} : { status, terminal: isTerminal(status) }) },
         });
