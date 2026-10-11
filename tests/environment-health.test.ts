@@ -325,6 +325,13 @@ describe("combined assessment", () => {
     expect(result.toolchain.drift).toBe("undeclared");
   });
 
+  it.each(["env-other", undefined])("does not infer health from rows with provenance %s", (environmentPublicId) => {
+    const result = assess({ builds: [row({ environmentPublicId })] });
+    expect(result.state).toBe("INDETERMINATE");
+    expect(result.build.health).toBe("UNKNOWN");
+    expect(result.build.conclusive).toBe(false);
+  });
+
   it("is STALE_TOOLCHAIN, and withholds the Build until one is requested", () => {
     const withheld = assess({
       builds: healthyRows,

@@ -703,10 +703,17 @@ export function assessEnvironmentFreshness(args: {
   /** The caller asking for a Build when toolchain drift is established. */
   refreshRequested?: boolean | undefined;
 }): FreshnessAssessment {
+  const unboundBuildEvidence = (args.builds ?? []).some(
+    (row) => row.environmentPublicId !== args.environmentPublicId,
+  );
+  const builds = args.builds?.filter(
+    (row) => row.environmentPublicId === args.environmentPublicId,
+  );
   const build = assessBuildHealth({
     asOfMs: args.asOfMs,
-    ...(args.builds === undefined ? {} : { builds: args.builds }),
-    ...(args.buildsConclusive === undefined ? {} : { conclusive: args.buildsConclusive }),
+    ...(builds === undefined ? {} : { builds }),
+    ...(unboundBuildEvidence ? { conclusive: false }
+      : args.buildsConclusive === undefined ? {} : { conclusive: args.buildsConclusive }),
   });
   const source = assessSourceFreshness({
     ...(args.environmentJsonPath === undefined
@@ -714,7 +721,7 @@ export function assessEnvironmentFreshness(args: {
       : { environmentJsonPath: args.environmentJsonPath }),
     ...(args.baseline === undefined ? {} : { baseline: args.baseline }),
     ...(args.observed === undefined ? {} : { observed: args.observed }),
-    ...(args.builds === undefined ? {} : { builds: args.builds }),
+    ...(builds === undefined ? {} : { builds }),
     buildHealth: build,
   });
   const toolchain = assessToolchainFreshness({
@@ -737,12 +744,7 @@ export function assessEnvironmentFreshness(args: {
             ? "INDETERMINATE"
             : "HEALTHY";
 
-  const unboundBuildEvidence =
-    args.refreshRequested === true &&
-    (args.builds ?? []).some(
-      (row) => row.environmentPublicId !== args.environmentPublicId,
-    );
-  const refresh = unboundBuildEvidence
+  const refresh = args.refreshRequested === true && unboundBuildEvidence
     ? {
         requested: true,
         dispatched: false as const,
