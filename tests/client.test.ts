@@ -500,6 +500,13 @@ describe("Retry-After parsing (RFC 9110 delay-seconds / HTTP-date)", () => {
     expect(waited).toBe("no retry");
   });
 
+  it.each(["UTC", "America/New_York"])("interprets an asctime HTTP-date as UTC under %s", async (timezone) => {
+    vi.stubEnv("TZ", timezone);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.UTC(1994, 10, 6, 8, 49, 35));
+    try { expect(await waitFor("Sun Nov  6 08:49:37 1994")).toBe(2_000); }
+    finally { clock.mockRestore(); vi.unstubAllEnvs(); }
+  });
+
   it("treats a past HTTP-date as retry now, which is what it means", async () => {
     expect(await waitFor("Sunday, 06-Nov-94 08:49:37 GMT")).toBe(0);
   });

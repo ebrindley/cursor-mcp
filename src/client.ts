@@ -626,7 +626,8 @@ function retryAfterMs(header: string | null): number | undefined {
   // All three HTTP-date forms begin with a day name, which is what separates a
   // date from a malformed number. Without this, "0x10" reaches Date.parse.
   if (!HTTP_DATE_START.test(value)) return undefined;
-  const date = Date.parse(value);
+  // RFC 9110 5.6.7: the zone-less asctime form is UTC, never local time.
+  const date = Date.parse(ASCTIME_DATE.test(value) ? `${value} GMT` : value);
   if (Number.isNaN(date)) return undefined;
   // A date already in the past legitimately means "retry now".
   return Math.max(date - Date.now(), 0);
@@ -634,3 +635,4 @@ function retryAfterMs(header: string | null): number | undefined {
 
 const DELAY_SECONDS = new RegExp("^\\d+$");
 const HTTP_DATE_START = new RegExp("^[A-Za-z]");
+const ASCTIME_DATE = /^[A-Za-z]{3} [A-Za-z]{3} [ \d]\d \d{2}:\d{2}:\d{2} \d{4}$/;
