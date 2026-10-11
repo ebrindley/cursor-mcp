@@ -343,6 +343,14 @@ describe("cursor_export_run against synthetic fixtures", () => {
 describe("cursor_export_run completeness", () => {
   const head = "id: 1\nevent: assistant\ndata: working\n\n";
 
+  it.each(["event: after\n", "id: 2\n", "retry: 1000\n"])("does not publish a replay with unfinished field-only content %j after done", async (tail) => {
+    const dir = await root();
+    const body = `event: done\ndata: {}\n\n${tail}`;
+    const { result } = await exportRun(policyFor(dir), [chunked(body, body.length)]);
+    expect(result.structuredContent).toMatchObject({ complete: false, stopReason: "trailing-content", rawPublished: false, partialKept: true });
+    expect(await readFile(join(dir, "bc-1", "run-1.sse.partial"), "utf8")).toBe(body);
+  });
+
   it("refuses to publish when anything follows done, keeping the bytes as a partial", async () => {
     const dir = await root();
     const body = `${head}event: done\ndata: {}\n\nid: 2\nevent: assistant\ndata: after\n\n`;
