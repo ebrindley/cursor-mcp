@@ -29,7 +29,7 @@
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { cliDigest, type CliWriteOperation } from "./cursor-cli.js";
-import { canonicalRepo, repoKey } from "./policy.js";
+import { assertPullRequestUrlShape, canonicalRepo, repoKey } from "./policy.js";
 
 /** Rows emitted from one `env list` payload. Beyond this the list is truncated. */
 export const MAX_CATALOG_ENTRIES = 200;
@@ -812,31 +812,22 @@ export function databaseDigest(read: CliConfigurationRead): string | undefined {
 
 export function readPullRequestUrl(value: unknown): string | undefined {
   if (!isRecord(value)) return undefined;
-  for (const key of ["prUrl", "pullRequestUrl", "pr_url"]) {
-    const text = trimmedString(value[key]);
-    if (text !== undefined && isGithubPullRequestUrl(text)) return text;
-  }
   const nested = value.pullRequest;
-  if (isRecord(nested)) {
-    const text = trimmedString(nested.url) ?? trimmedString(nested.htmlUrl);
-    if (text !== undefined && isGithubPullRequestUrl(text)) return text;
+  const candidates = [
+    value.prUrl, value.pullRequestUrl, value.pr_url,
+    isRecord(nested) ? trimmedString(nested.url) ?? trimmedString(nested.htmlUrl) : undefined,
+    value.url,
+  ];
+  for (const candidate of candidates) {
+    const text = trimmedString(candidate);
+    if (text === undefined) continue;
+    try {
+      return assertPullRequestUrlShape(text).canonical;
+    } catch {
+      // Invalid CLI readback is not a published PR, and is never echoed.
+    }
   }
-  const url = trimmedString(value.url);
-  if (url !== undefined && isGithubPullRequestUrl(url)) return url;
   return undefined;
-}
-
-function isGithubPullRequestUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return (
-      url.protocol === "https:" &&
-      url.hostname.toLowerCase() === "github.com" &&
-      /\/pull\/\d+\/?$/.test(url.pathname)
-    );
-  } catch {
-    return false;
-  }
 }
 
 export function environmentAbsentFromList(
