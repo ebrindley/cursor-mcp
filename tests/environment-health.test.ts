@@ -314,6 +314,7 @@ describe("combined assessment", () => {
     expect(result.refresh.disposition).toBe("NOT_NEEDED");
     expect(result.refresh.dispatched).toBe(false);
     expect(result.refresh.reason).toContain("no-op");
+    expect(result.nextSteps.join(" ")).toContain("cursor_get_active_build");
   });
 
   it("is HEALTHY on Build evidence alone when nothing else was declared", () => {

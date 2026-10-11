@@ -924,8 +924,8 @@ function stateNextSteps(
   toolchain: ToolchainFreshness,
 ): string[] {
   const activeState =
-    "Read active state from the environment dashboard if you need it: no supported authority here " +
-    "reports the environment's active Build, so HEALTHY describes Build history only.";
+    "Read active state with cursor_get_active_build. This delegated assessment cannot identify " +
+    "the environment's active Build, so HEALTHY describes Build history only.";
   switch (state) {
     case "HEALTHY":
       return [activeState];
