@@ -138,6 +138,7 @@ describe("cursor_tail_run", () => {
       expect(result.structuredContent).toMatchObject({ done: true, status: "CANCELLED", terminal: true, statusVerified: true });
       expect(result.structuredContent).not.toHaveProperty("text");
       expect(JSON.stringify(result.content)).toContain("CURSOR_UNTRUSTED");
+      expect(JSON.stringify(result.content)).not.toContain("Pass lastEventId back to continue");
     } finally { await client.close(); await server.close(); }
   });
 
