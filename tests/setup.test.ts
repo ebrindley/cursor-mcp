@@ -80,6 +80,15 @@ describe("credential-safe doctor", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it.each([{ tools: ["cursor_unknown_tool"] }, { tools: ["cursor_delete_agent"] }, { tools: ["cursor_export_run"] }])("reports an empty effective tool surface for grants %j", async ({ tools }) => {
+    const path = await destination();
+    await writeFile(path, JSON.stringify({ deleteEnabled: false, defaultProfile: "p", profiles: { p: { repos: ["O/R"], tools } } }));
+    const fetchImpl = vi.fn<typeof fetch>();
+    const rows = await doctor(path, true, {}, fetchImpl);
+    expect(rows.find((r) => r.check === "policy")?.status).toBe("error");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("checks repository visibility without displaying identity or repository responses", async () => {
     const path = await destination(); await setup("ExampleOrg/ExampleRepo", path);
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(json({ apiKeyName: key, userEmail: key, createdAt: "2026-01-01" }))
