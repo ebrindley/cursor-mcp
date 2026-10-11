@@ -354,8 +354,8 @@ class CallIndex {
    *
    * A rejected update never half-applies: the candidate is a copy, and what is
    * stored is either all of it or the previous entry with only its cheap status
-   * fields refreshed, so the log never claims a command is still running when the
-   * stream said otherwise.
+   * fields refreshed. If even those fields cannot fit, the obsolete entry is
+   * omitted; the call index and truncation flag retain that observation.
    */
   #terminalize(call: ExportedCall, event: Record<string, unknown>): void {
     const args = asRecord(event.args);
@@ -395,6 +395,10 @@ class CallIndex {
     if (entry.executionTime !== undefined) kept.executionTime = entry.executionTime;
     const keptCost = entryCost(kept);
     if (fits(keptCost)) store(kept, keptCost);
+    else {
+      this.#terminal.delete(call.callId);
+      this.#terminalBytes -= before;
+    }
   }
 
   calls(): ExportedCall[] {
