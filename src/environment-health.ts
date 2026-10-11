@@ -846,12 +846,16 @@ function recommendRefresh(args: {
     };
   }
 
-  if (args.state === "INDETERMINATE") {
+  if (
+    args.state === "INDETERMINATE" ||
+    args.build.health !== "HEALTHY" ||
+    args.source.drift === "unknown"
+  ) {
     return {
       ...base,
       disposition: "WITHHELD",
       reason:
-        "Drift was not established, so no Build is requested. A Build is a write, and this server " +
+        "Refresh prerequisites are incomplete, so no Build is requested. A Build is a write, and this server " +
         "never spends one on an unproven condition.",
       nextSteps: [
         ...(args.toolchain.unreportedNames.length === 0
@@ -862,6 +866,9 @@ function recommendRefresh(args: {
         ...(args.build.conclusive
           ? []
           : ["Page the Build list forward so an absent row means an absent row."]),
+        ...(args.source.drift === "unknown"
+          ? ["Supply both a baseline and an observed source anchor, or neither."]
+          : []),
         "Re-run this check once the evidence is complete.",
       ],
     };
