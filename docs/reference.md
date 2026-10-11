@@ -244,6 +244,10 @@ environment or a commit of that file on a repository-file managed one. `install`
 terminal commands, inline Dockerfiles, image references, egress allowlists, browser paths,
 and MCP patterns are reported as digests rather than text, because a
 definition can carry an inline credential even though the schema has no secret field.
+Inspection also returns `{ digest, bytes, lines }` summaries for definition names
+and users, terminal names and descriptions, port names, MCP names and tool
+allowlists, and repository dependencies. These fields may contain credentials;
+the original values remain in the owner's definition file.
 
 The schema is checked locally; it is not downloaded at runtime. Tests use original
 behavioral examples, so future upstream additions may require an update here.

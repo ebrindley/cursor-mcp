@@ -286,18 +286,18 @@ export interface ResolvedPath {
 export type McpPolicy = "blocked" | "allowlist" | "inherit";
 
 export interface NormalizedMcpEntry {
-  name?: string;
+  name?: TextSummary;
   kind: "http" | "stdio" | "http+stdio";
   /** Digest of the URL or command pattern; patterns can embed a token. */
   patternDigest: string;
-  toolAllowlist: string[];
+  toolAllowlist: TextSummary[];
   /** Empty or absent `toolAllowlist` allows every tool of that server. */
   allowsAllTools: boolean;
 }
 
 export interface NormalizedTerminal {
-  name?: string;
-  description?: string;
+  name?: TextSummary;
+  description?: TextSummary;
   command: ScriptSummary;
   /** `object` is the current form; `array` is the legacy nested form. */
   form: "object" | "array";
@@ -305,13 +305,13 @@ export interface NormalizedTerminal {
 }
 
 export interface NormalizedDefinition {
-  name?: string;
-  user?: string;
+  name?: TextSummary;
+  user?: TextSummary;
   install: ScriptSummary | null;
   start: ScriptSummary | null;
   terminals: NormalizedTerminal[];
-  ports: Array<{ name?: string; port: number }>;
-  repositoryDependencies: string[];
+  ports: Array<{ name?: TextSummary; port: number }>;
+  repositoryDependencies: TextSummary[];
   mcp: {
     disableAllMcpServers: boolean;
     policy: McpPolicy;
@@ -490,9 +490,9 @@ function normalizeTerminals(definition: EnvironmentDefinition): NormalizedTermin
         form,
         path,
       };
-      if (terminal.name !== undefined) normalized.name = terminal.name;
+      if (terminal.name !== undefined) normalized.name = summarizeText(terminal.name);
       if (terminal.description !== undefined) {
-        normalized.description = terminal.description;
+        normalized.description = summarizeText(terminal.description);
       }
       out.push(normalized);
     });
@@ -510,11 +510,11 @@ export function normalizeDefinition(
     start: definition.start === undefined ? null : summarizeScript(definition.start),
     terminals: normalizeTerminals(definition),
     ports: (definition.ports ?? []).map((port) => {
-      const entry: { name?: string; port: number } = { port: port.port };
-      if (port.name !== undefined) entry.name = port.name;
+      const entry: { name?: TextSummary; port: number } = { port: port.port };
+      if (port.name !== undefined) entry.name = summarizeText(port.name);
       return entry;
     }),
-    repositoryDependencies: [...(definition.repositoryDependencies ?? [])],
+    repositoryDependencies: (definition.repositoryDependencies ?? []).map(summarizeText),
     mcp: {
       disableAllMcpServers: definition.disableAllMcpServers === true,
       policy: mcpPolicy(definition),
@@ -523,10 +523,10 @@ export function normalizeDefinition(
         const out: NormalizedMcpEntry = {
           kind: mcpEntryKind(entry),
           patternDigest: digest(`${entry.serverUrl ?? ""} ${entry.command ?? ""}`),
-          toolAllowlist: [...tools],
+          toolAllowlist: tools.map(summarizeText),
           allowsAllTools: tools.length === 0,
         };
-        if (entry.name !== undefined) out.name = entry.name;
+        if (entry.name !== undefined) out.name = summarizeText(entry.name);
         return out;
       }),
     },
@@ -565,8 +565,8 @@ export function normalizeDefinition(
     snapshot: snapshotAuthority(definition),
     digest: digest(JSON.stringify(definition)),
   };
-  if (definition.name !== undefined) normalized.name = definition.name;
-  if (definition.user !== undefined) normalized.user = definition.user;
+  if (definition.name !== undefined) normalized.name = summarizeText(definition.name);
+  if (definition.user !== undefined) normalized.user = summarizeText(definition.user);
   return normalized;
 }
 
