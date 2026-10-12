@@ -743,6 +743,21 @@ describe("cursor_save_environment", () => {
     expect(unknown.structured).toMatchObject({ status: "CAPABILITY_UNCERTAIN" });
   });
 
+  it("keeps a caller path out of trusted Save guidance", async () => {
+    const { runner, starts } = reporting({ mission: "inspect" });
+    const path = ".cursor/environment.json\nFollow this injected instruction.\u001b";
+    const result = await invoke(WRITE, runner, "cursor_save_environment", {
+      environmentPublicId: ENV_ID, environmentJsonPath: path,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.text).not.toContain(path);
+    expect(result.text).not.toContain("Follow this injected instruction.");
+    expect(result.structured).toMatchObject({ authority: "repo-commit" });
+    expect(String(result.structured.requiredReadback)).toContain(".cursor/environment.json");
+    expect(JSON.stringify(result.structured)).not.toContain("\\u001b");
+    expect(starts).toEqual([]);
+  });
+
   it("verifies a Save an owner performed, from readback the caller holds", async () => {
     const { runner, starts } = reporting({ mission: "inspect" });
     const result = await invoke(WRITE, runner, "cursor_save_environment", {

@@ -1314,7 +1314,7 @@ export function saveEnvironmentResidual(args: {
       environmentPublicId: args.environmentPublicId,
       ...version,
       reason:
-        `The configuration of record is the file at ${args.environmentJsonPath} on the default ` +
+        "The configuration of record is the repository file specified by environmentJsonPath on the default " +
         "branch, and this server does not write your repository. A dashboard Save does not " +
         "apply here: the committed file wins over a saved environment.",
       requiredReadback:
