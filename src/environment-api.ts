@@ -33,7 +33,7 @@ export const EnvironmentHistorySchema = z.object({
 
 export function assertEnvironmentRead(profile: Profile | undefined, environment: Environment): void {
   const pinned = profile?.environments?.find(e => typeof e !== "string" && e.publicId === environment.id);
-  const name = environment.name ?? (typeof pinned === "object" ? pinned.name : undefined);
+  const name = typeof pinned === "object" ? pinned.name : environment.name;
   if (name === undefined) {
     if (profile?.environmentAccess !== "account") throw new PolicyError("unnamed environment is not in the active profile");
     assertAgentReposAllowed(profile, environment.repos.map(r => r.url));

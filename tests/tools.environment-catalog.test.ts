@@ -67,17 +67,29 @@ describe("public environment reads", () => {
     expect(result.structuredContent).toMatchObject({ configuration: { candidates: [{ source: "repository-file", path: ".cursor/environment.json" }] } });
   });
   it.each([
-    { ...environment, id: "different" }, { ...environment, name: "different" },
+    { ...environment, id: "different" },
     { ...environment, owner: "team" }, { ...environment, repos: [{ url: "https://github.com/other/private" }] },
   ])("refuses identity or scope mismatch before history reads", async data => {
     const { result, calls } = await invoke("cursor_list_environment_history", { environmentPublicId: "env-alpha" }, { "/v1/environments/env-alpha": data });
     expect(result.isError).toBe(true);
     expect(calls).toEqual(["/v1/environments/env-alpha"]);
   });
-  it("supports unnamed environments through an existing pinned grant", async () => {
+  it.each([undefined, "renamed"])("supports name %s through an existing pinned grant", async name => {
     const { name: _, ...unnamed } = environment;
-    const { result } = await invoke("cursor_get_environment_configuration", { environmentPublicId: "env-alpha" }, { "/v1/environments/env-alpha": unnamed });
+    const { result } = await invoke("cursor_get_environment_configuration", { environmentPublicId: "env-alpha" },
+      { "/v1/environments/env-alpha": { ...unnamed, ...(name ? { name } : {}) } });
     expect(result.isError).not.toBe(true);
+  });
+  it.each([
+    { repos: [{ url: "https://github.com/acme/other" }] }, { owner: "team" },
+  ])("preserves pinned restrictions after an account-access rename: %j", async changes => {
+    const configured: Policy = { ...policy, profiles: { p: { tools: ["read:*"], repos: ["acme/app", "acme/other"],
+      environmentAccess: "account", environments: [{ name: "alpha", publicId: "env-alpha", scope: "personal", repos: ["acme/app"] }] } } };
+    const { result, calls } = await invoke("cursor_list_environment_history", { environmentPublicId: "env-alpha" },
+      { "/v1/environments/env-alpha": { ...environment, name: "renamed", ...changes },
+        "/v1/environments/env-alpha/history": { items: [] } }, configured);
+    expect(result.isError).toBe(true);
+    expect(calls).toEqual(["/v1/environments/env-alpha"]);
   });
   it("pages history and replaces embedded configurations with digests", async () => {
     const { result, calls } = await invoke("cursor_list_environment_history", { environmentPublicId: "env-alpha", cursor: "next" }, {
