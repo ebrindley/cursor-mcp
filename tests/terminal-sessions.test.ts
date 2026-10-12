@@ -10,8 +10,10 @@ function fixture(bytes = 65536, capacity = 4) {
   const present = new Set<string>(); let releaseSpawn: (() => void) | undefined; let pauseSpawn = false;
   let counter = 0, failInput = false, failCleanup = false, changed = false, failSpawn = false, hangCleanup = false;
   let timeoutMethod: string | undefined;
+  let pauseConnect = false, releaseConnect: (() => void) | undefined;
   const connector: TerminalConnector = { async connect(expected) {
     calls.push({ method: 'Connect', input: { expected } });
+    if (pauseConnect) await new Promise<void>(resolve => { releaseConnect = resolve; });
     if (changed && expected) throw new TerminalFailure('machine_changed');
     const peer: TerminalPeer = { async unary(method, input, submitted) {
       calls.push({ method, input }); submitted?.();
@@ -33,6 +35,7 @@ function fixture(bytes = 65536, capacity = 4) {
   const service = new TerminalSessions(connector, bytes, capacity);
   const request = (operation: string, args = {}) => ({ operation, sessionId: service.sessionId, ...args });
   return { service, calls, request, pauseSpawn: () => { pauseSpawn = true; }, releaseSpawn: () => releaseSpawn!(),
+    pauseConnect: () => { pauseConnect = true; }, releaseConnect: () => { pauseConnect = false; releaseConnect!(); },
     timeoutNext: (method: string) => { timeoutMethod = method; },
     inputFails: () => { failInput = true; }, cleanupFails: () => { failCleanup = true; }, hangCleanup: () => { hangCleanup = true; }, recover: () => { failCleanup = false; },
     changed: () => { changed = true; }, spawnFails: () => { failSpawn = true; },
@@ -54,6 +57,29 @@ test('creation keeps its connection for attachment and input, then reconnects af
     expect(f.calls.filter(c => c.method === 'Close')).toHaveLength(1);
     await f.service.handle(f.request('attach', { terminalId: created.terminalId }));
     expect(f.calls.filter(c => c.method === 'Connect').map(c => c.input.expected)).toEqual([undefined, 'machine']);
+  } finally { f.service.close(); }
+});
+
+test.each(['create', 'input'])('cancelled %s observation reports a pending owner as unknown before submission', async operation => {
+  const f = fixture(), stop = new AbortController();
+  try {
+    const created = operation === 'input' ? await f.create() : undefined;
+    if (created) {
+      f.drop();
+      await vi.waitFor(async () => expect((await f.service.handle(f.request('list'))).terminals).toMatchObject([{ state: 'detached' }]));
+    }
+    f.pauseConnect();
+    const request = f.request(operation, { sequence: 1, ...(created ? { terminalId: created.terminalId, data: 'pwd\n' } : {}) });
+    const pending = f.service.handle(request, stop.signal);
+    await vi.waitFor(() => expect(f.calls.filter(call => call.method === 'Connect')).toHaveLength(created ? 2 : 1));
+    stop.abort();
+    expect(await pending).toMatchObject({ status: 'request_cancelled',
+      ...(created ? { inputOutcome: 'unknown', lastInputOutcome: 'unknown', nextInputSequence: 2 } : { creationOutcome: 'unknown', state: 'starting' }) });
+    f.releaseConnect();
+    const method = created ? 'SendInput' : 'SpawnPty';
+    await vi.waitFor(() => expect(f.calls.filter(call => call.method === method)).toHaveLength(1));
+    await vi.waitFor(async () => expect(await f.service.handle(request)).toMatchObject(created ? { inputOutcome: 'submitted' } : { creationOutcome: 'submitted' }));
+    expect(f.calls.filter(call => call.method === method)).toHaveLength(1);
   } finally { f.service.close(); }
 });
 

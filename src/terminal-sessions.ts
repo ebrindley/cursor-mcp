@@ -119,8 +119,14 @@ export class TerminalSessions {
     catch (error) {
       if (!(error instanceof WaitStoppedError)) throw error;
       const op = this.sessions.get(request.terminalId ?? (request.operation === 'create' ? this.lastCreate?.terminalId : '') ?? '');
+      const inputPending = request.operation === 'input' && op?.busy &&
+        op.lastInput?.sequence === request.sequence && op.lastInput?.outcome === 'not_submitted';
+      const creationPending = request.operation === 'create' && this.creating &&
+        this.lastCreate?.sequence === request.sequence && op?.creationOutcome === 'not_submitted';
       return { ...(op ? this.snapshot(op) : {}), status: error.reason === 'deadline' ? 'deadline' : 'request_cancelled',
-        ...(request.operation === 'input' ? { inputOutcome: op?.lastInput?.outcome ?? 'not_submitted' } : {}) };
+        ...(creationPending ? { creationOutcome: 'unknown' } : {}),
+        ...(inputPending ? { lastInputOutcome: 'unknown' } : {}),
+        ...(request.operation === 'input' ? { inputOutcome: inputPending ? 'unknown' : op?.lastInput?.outcome ?? 'not_submitted' } : {}) };
     } finally { scope.dispose(); signal?.removeEventListener('abort', cancel); }
   }
 
