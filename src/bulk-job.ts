@@ -78,10 +78,16 @@ export interface Clock {
 export const realClock: Clock = {
   now: systemClock.now, wallNow: systemClock.wallNow,
   sleep: async (ms, signal) => {
-    const scope = createWaitScope({ timeoutMs: Math.max(ms + 1000, 1000), signal });
-    try { await sleep(scope, ms); return true; }
-    catch { return false; }
-    finally { scope.dispose(); }
+    const end = systemClock.now() + ms;
+    do {
+      // Keep both the sleep and its deadline margin within Node's timer limit.
+      const slice = Math.min(Math.max(end - systemClock.now(), 0), 2_147_483_647 - 1000);
+      const scope = createWaitScope({ timeoutMs: Math.max(slice + 1000, 1000), signal });
+      try { await sleep(scope, slice); }
+      catch { return false; }
+      finally { scope.dispose(); }
+    } while (systemClock.now() < end);
+    return true;
   },
 };
 

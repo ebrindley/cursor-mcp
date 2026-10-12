@@ -11,7 +11,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentScope } from "../src/agent-scope.js";
-import { type BulkJob, BulkJobs } from "../src/bulk-job.js";
+import { type BulkJob, BulkJobs, realClock } from "../src/bulk-job.js";
 import { CursorClient } from "../src/client.js";
 import { activeProfile, BulkSchema, type BulkSettings, type Policy } from "../src/config.js";
 import { registerBulkTools } from "../src/tools/bulk.js";
@@ -110,6 +110,24 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.useRealTimers();
+});
+
+it.each([false, true])("preserves oversized bulk sleep without timer overflow (cancel=%s)", async cancel => {
+  const maximum = 2_147_483_647, timers = globalThis.setTimeout;
+  const delays: number[] = [];
+  vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, ms, ...args) => {
+    delays.push(ms ?? 0);
+    return timers(callback, (ms ?? 0) > maximum ? 1 : ms, ...args);
+  });
+  const stop = new AbortController();
+  let result: boolean | undefined;
+  const pending = realClock.sleep(maximum + 10_000, stop.signal).then(value => { result = value; });
+  await vi.advanceTimersByTimeAsync(maximum);
+  expect(result).toBeUndefined();
+  expect(delays.every(ms => ms <= maximum)).toBe(true);
+  if (cancel) stop.abort(); else await vi.advanceTimersByTimeAsync(10_000);
+  await pending;
+  expect(result).toBe(!cancel);
 });
 
 describe("a bulk job", () => {
