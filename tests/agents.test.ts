@@ -1989,6 +1989,19 @@ describe("late environment discovery", () => {
 
 
 describe("launch recovery evidence", () => {
+  it("cancels invalid repository readback before calculating source pinning", async () => {
+    fetchImpl.mockImplementation(async input => String(input).endsWith("/cancel")
+      ? json({ id: "run-1" })
+      : json(createdPayload({ repos: [{ url: "https://example.invalid/repo", startingRef: "main" }] })));
+    const client = await connect(fetchImpl, policy(["*"]), true);
+    const result = await client.callTool({ name: "cursor_create_agent", arguments: {
+      repo: "ExampleOrg/ExampleRepo", startingRef: "main", prompt: "x",
+    } });
+    expect(result.isError).toBe(true);
+    expect(fetchImpl.mock.calls.filter(([url]) => String(url).endsWith("/cancel"))).toHaveLength(1);
+    expect(text(result)).toContain("agent bc-1 run run-1");
+  });
+
   it("reports both ids after rejected launch cleanup fails, allowing an exact cancellation retry", async () => {
     let cancels = 0;
     fetchImpl.mockImplementation(async (input) => {

@@ -1122,16 +1122,7 @@ export function registerAgentTools(
               (repo): repo is Required<LaunchRepo> => repo.startingRef !== undefined,
             )
           : [];
-      const sourcePinned =
-        requestedRefs.length === 0
-          ? undefined
-          : requestedRefs.every((requested) =>
-              startingRefs.some(
-                (reported) =>
-                  repoKey(reported.repoUrl) === repoKey(requested.url) &&
-                  reported.startingRef === requested.startingRef,
-              ),
-            );
+      let sourcePinned: boolean | undefined;
       // Cursor honoring the client id is what makes a replay of a caller-supplied
       // id a 409 instead of a second agent. When the readback id differs the
       // launch still happened, so it is reported as-is with
@@ -1139,6 +1130,9 @@ export function registerAgentTools(
       const agentIdHonored = created.agent.id.toLowerCase() === agentId;
       try {
         assertLaunchReadback(launch, created.agent);
+        sourcePinned = requestedRefs.length === 0 ? undefined : requestedRefs.every((requested) =>
+          startingRefs.some((reported) => repoKey(reported.repoUrl) === repoKey(requested.url) &&
+            reported.startingRef === requested.startingRef));
         assertAgentAccess(profile, created.agent);
         scope.remember(created.agent);
       } catch (error) {
