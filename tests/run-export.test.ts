@@ -106,6 +106,25 @@ async function root(): Promise<string> {
   return mkdtemp(join(tmpdir(), "cursor-export-"));
 }
 
+it.skipIf(process.platform === "win32")("creates private exports without changing existing directory modes", async () => {
+  const dir = await root(), previous = process.umask(0o022);
+  try {
+    const paths = exportPaths(dir, "bc-private", "run-1");
+    const handle = await openPartial(paths);
+    await handle.writeFile("captured"); await handle.close();
+    expect(statSync(paths.dir).mode & 0o777).toBe(0o700);
+    expect(statSync(paths.partial).mode & 0o777).toBe(0o600);
+    await publish(paths.partial, paths.raw);
+    await writeSidecar(paths.tools, "{}");
+    await writeSidecar(paths.terminal, "# output");
+    for (const file of [paths.raw, paths.tools, paths.terminal]) expect(statSync(file).mode & 0o777).toBe(0o600);
+    const existing = exportPaths(dir, "bc-existing", "run-1");
+    await mkdir(existing.dir, { mode: 0o755 });
+    await (await openPartial(existing)).close();
+    expect(statSync(existing.dir).mode & 0o777).toBe(0o755);
+  } finally { process.umask(previous); }
+});
+
 function policyFor(exportRoot: string, tools = ["cursor_export_run"]): Policy {
   return {
     deleteEnabled: false,

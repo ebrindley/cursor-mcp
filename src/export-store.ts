@@ -109,12 +109,12 @@ export function exportPaths(root: string, agentId: string, runId: string): Expor
  */
 export async function openPartial(paths: ExportPaths, stop?: () => string | undefined): Promise<FileHandle> {
   checkStop(stop);
-  await mkdir(paths.dir, { recursive: true });
+  await mkdir(paths.dir, { recursive: true, mode: 0o700 });
   checkStop(stop);
   await assertResolvedDir(paths, stop);
   checkStop(stop);
   try {
-    return await open(paths.partial, "wx");
+    return await open(paths.partial, "wx", 0o600);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
       throw new PolicyError(
@@ -297,7 +297,7 @@ export async function writeSidecar(
 ): Promise<Publication> {
   const partial = `${path}.partial`;
   if (stop?.() !== undefined) return { linked: false, partialRemoved: false, detail: "sidecar observation stopped" };
-  const handle = await open(partial, "wx").catch((error: unknown) => {
+  const handle = await open(partial, "wx", 0o600).catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
       throw new PolicyError(
         `refusing to write ${path}: ${partial} already exists. A half-written sidecar ` +

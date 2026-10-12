@@ -49,6 +49,10 @@ Agent-scope checks are identical to every other Cursor read: `scope.assert` on t
 agent id before anything else, so a profile's repository allowlist governs which
 runs can be exported at all.
 
+New export directories use mode `0700`; new capture and sidecar files use `0600`.
+Existing directory and artifact permissions are unchanged. Share exports explicitly
+when another local user needs access.
+
 ## 2. Where the bytes stop: `done`, chunk-atomic, buffers empty
 
 **Completion stops at the `done` event. A bounded clean EOF is not required and is
