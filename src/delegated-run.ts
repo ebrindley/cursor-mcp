@@ -31,6 +31,7 @@
  */
 
 import { modelSelection } from "./model-selection.js";
+import { randomUUID } from "node:crypto";
 import type { CursorClient } from "./client.js";
 import { CursorCancelledError, seg } from "./client.js";
 import type { Profile } from "./config.js";
@@ -558,6 +559,7 @@ export class CursorDelegatedRunner implements DelegatedRunner {
     const autoCreatePR = resolveAutoCreatePR(this.#profile, false);
     const model = resolveModel(this.#profile, undefined);
 
+    const agentId = `bc-${randomUUID()}`;
     const launchScope = requestScope(45_000);
     let dispatched = false;
     const created = await withWaitScope(launchScope, () => within(launchScope, () => {
@@ -565,6 +567,7 @@ export class CursorDelegatedRunner implements DelegatedRunner {
       dispatched = true;
       return this.#client.post("/v1/agents", CreateAgentResponseSchema, {
       body: {
+        agentId,
         prompt: { text: missionPrompt(request) },
         env: { type: "cloud" as const, name: launch.name },
         autoCreatePR,
@@ -573,10 +576,19 @@ export class CursorDelegatedRunner implements DelegatedRunner {
       },
     });
     })).catch(error => {
+      if (dispatched && error instanceof CursorContractError) {
+        throw new CursorContractError(`${error.message}; the launch outcome is unknown; requested agentId ${agentId}. Inspect cursor_get_agent before retrying.`);
+      }
+      if (dispatched && error instanceof CursorCancelledError) {
+        throw new CursorCancelledError(`${error.message}; requested agentId ${agentId}. Inspect cursor_get_agent before retrying.`);
+      }
+      if (dispatched && error instanceof CursorTransportError) {
+        throw new CursorTransportError(`${error.message}; requested agentId ${agentId}. Inspect cursor_get_agent before retrying.`);
+      }
       if (!(error instanceof WaitStoppedError)) throw error;
       const detail = error.reason === "deadline" ? "reached its deadline" : error.reason === "shutdown" ? "stopped because the server shut down" : "was cancelled by the caller";
       const outcome = dispatched ? "the launch outcome is unknown; inspect cursor_list_agents before retrying" : "the launch was not dispatched and no agent was created";
-      const message = `Delegated launch observation ${detail}; ${outcome}.`;
+      const message = `Delegated launch observation ${detail}; ${outcome}.${dispatched ? ` Requested agentId ${agentId}; its acceptance is unverified.` : ""}`;
       throw error.reason === "deadline" ? new CursorTransportError(message) : new CursorCancelledError(message);
     }).finally(() => launchScope.dispose());
 

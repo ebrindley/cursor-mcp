@@ -9,8 +9,8 @@ import { createDelegatedLifecycleOperations } from "../src/tools/environment-lif
  * -- one trigger, an out-of-band identity gate, and names but never values.
  */
 
-import { describe, expect, it } from "vitest";
-import { CursorClient } from "../src/client.js";
+import { describe, expect, it, vi } from "vitest";
+import { CursorClient, CursorCancelledError } from "../src/client.js";
 import { AgentScope } from "../src/agent-scope.js";
 import { activeProfile } from "../src/config.js";
 import type { Policy } from "../src/config.js";
@@ -22,7 +22,7 @@ import {
   normalizeMissionRequest,
   type DelegationHandle,
 } from "../src/delegated-run.js";
-import { CursorContractError, PolicyError } from "../src/errors.js";
+import { CursorApiError, CursorContractError, PolicyError } from "../src/errors.js";
 import { createWaitScope } from "../src/wait.js";
 import { withWaitScope } from "../src/request-context.js";
 
@@ -158,6 +158,38 @@ it("describes a stopped delegated launch as unknown after POST admission", async
 });
 
 describe("launching a delegate", () => {
+  it("preserves a client cancellation class after dispatch", async () => {
+    const client = new CursorClient({ apiKey: "test" }), profile = activeProfile(policy({}));
+    const post = vi.spyOn(client, "post").mockRejectedValue(new CursorCancelledError("POST was cancelled by the caller; the outcome is unknown"));
+    const delegate = new CursorDelegatedRunner(client, profile, new AgentScope(client, profile));
+    await expect(delegate.start({ environment: ENV_NAME, request: { mission: "inspect" } }))
+      .rejects.toBeInstanceOf(CursorCancelledError);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["contract", "transport", "rejected"])("retains requested identity after a %s launch failure without replay", async kind => {
+    let requestedId = "", calls = 0;
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      calls++;
+      requestedId = JSON.parse(String(init?.body)).agentId;
+      if (kind === "transport") throw new TypeError("fetch failed");
+      return kind === "rejected" ? json({ error: { message: "forbidden" } }, 403)
+        : json({ agent: agentPayload().agent, run: { id: "run-1" } });
+    };
+    let failure: unknown;
+    try { await runner(policy({}), fetchImpl).start({ environment: ENV_NAME, request: { mission: "inspect" } }); }
+    catch (error) { failure = error; }
+    expect(requestedId).toMatch(/^bc-[0-9a-f-]{36}$/);
+    expect(calls).toBe(1);
+    if (kind === "rejected") {
+      expect(failure).toBeInstanceOf(CursorApiError);
+      expect(String(failure)).not.toContain("outcome is unknown");
+    } else {
+      expect(String(failure)).toContain(requestedId);
+      expect(String(failure)).toContain("outcome is unknown");
+    }
+  });
+
   it("refuses an environment the profile does not name", async () => {
     const { fetchImpl, calls } = stub({});
     await expect(
