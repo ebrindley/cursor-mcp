@@ -50,6 +50,12 @@ const definitionOf = (name: string): EnvironmentDefinition => {
 };
 
 describe("JSONC parsing", () => {
+  it("preserves fields after a line comment ending with lone CR", () => {
+    expect(parseJsonc('{\n// comment\r"install":"echo ready"\n}')).toEqual({
+      ok: true, value: { install: "echo ready" },
+    });
+  });
+
   it("accepts comments, as the published schema declares", () => {
     const result = parseJsonc('{\n  // a note\n  "name": "x" /* and another */\n}');
     expect(result).toEqual({ ok: true, value: { name: "x" } });

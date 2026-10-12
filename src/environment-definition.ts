@@ -210,7 +210,7 @@ export function parseJsonc(text: string): JsoncResult {
       continue;
     }
     if (char === "/" && text.charAt(index + 1) === "/") {
-      while (index < text.length && text.charAt(index) !== "\n") {
+      while (index < text.length && text.charAt(index) !== "\n" && text.charAt(index) !== "\r") {
         out += " ";
         index += 1;
       }
