@@ -144,7 +144,10 @@ Cursor documents that replaying the same id returns `409 agent_id_conflict` inst
 second agent — so pass your own `bc-<uuid>` whenever the call might be retried, and reuse it
 on the retry. An id minted for you when you omit one is new on every call and protects
 nothing across retries. `agentIdHonored: false` means Cursor did not use the id you sent, so
-even a replay of that id would not be refused as a duplicate. A repository entry may carry `prUrl` to work on an existing pull request; it must be
+even a replay of that id would not be refused as a duplicate. Ambiguous create failures
+name the requested ID and direct callers to `cursor_get_agent`; the server sends no
+automatic readback or second create. An ID conflict likewise directs readback without
+claiming that the requested work completed. A repository entry may carry `prUrl` to work on an existing pull request; it must be
 a GitHub PR on that same repository, and it excludes `startingRef`, which Cursor would
 ignore. `cursor_create_agent` intentionally exposes no `envVars`, inline MCP-server
 configuration, or provider credential fields. Credential-bearing VM bootstrap is a privileged host-side

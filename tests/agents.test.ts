@@ -10,7 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { CursorClient } from "../src/client.js";
+import { CursorCancelledError, CursorClient } from "../src/client.js";
 import { AgentScope } from "../src/agent-scope.js";
 import { activeProfile, READ_ONLY_POLICY } from "../src/config.js";
 import type { Policy } from "../src/config.js";
@@ -1989,6 +1989,79 @@ describe("late environment discovery", () => {
 
 
 describe("launch recovery evidence", () => {
+  it.each(["transport", "empty", "non-json", "schema", "server", "not-found", "conflict"])(
+    "retains the submitted ID after a %s failure without another request", async kind => {
+      fetchImpl.mockImplementation(async () => {
+        if (kind === "transport") throw new TypeError("fetch failed");
+        if (kind === "empty") return new Response("");
+        if (kind === "non-json") return new Response("not JSON");
+        if (kind === "schema") return json({});
+        return json({ error: { code: kind === "conflict" ? "agent_id_conflict" : "upstream_error" } },
+          kind === "server" ? 502 : kind === "not-found" ? 404 : 409);
+      });
+      const client = await connect(fetchImpl, policy(["*"]));
+      const result = await client.callTool({ name: "cursor_create_agent", arguments: {
+        repo: "ExampleOrg/ExampleRepo", prompt: "x",
+      } });
+      expect(result.isError).toBe(true);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      const requestedId = JSON.parse(String(fetchImpl.mock.calls[0]![1]!.body)).agentId;
+      expect(requestedId).toMatch(/^bc-[0-9a-f-]{36}$/);
+      expect(text(result)).toContain(`Requested agentId ${requestedId}`);
+      expect(text(result)).toContain("Inspect cursor_get_agent with this ID");
+      expect(text(result)).toContain(kind === "conflict" ? "agent ID already exists" : "outcome is unknown");
+    },
+  );
+
+  it("keeps the recovery ID when a long contract error is truncated", async () => {
+    const payload = createdPayload();
+    fetchImpl.mockResolvedValue(json({ ...payload, agent: {
+      ...payload.agent, repos: Array.from({ length: 200 }, () => ({ url: 42 })),
+    } }));
+    const client = await connect(fetchImpl, { ...policy(["*"]), maxResponseBytes: 1024 });
+    const result = await client.callTool({ name: "cursor_create_agent", arguments: {
+      repo: "ExampleOrg/ExampleRepo", prompt: "x",
+    } });
+    const requestedId = JSON.parse(String(fetchImpl.mock.calls[0]![1]!.body)).agentId;
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain(`[truncated: showing 1024`);
+    expect(text(result)).toContain(`Requested agentId ${requestedId}`);
+    expect(text(result)).toContain("Inspect cursor_get_agent with this ID");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves a cancellation's evidence that the create was not dispatched", async () => {
+    const post = vi.spyOn(CursorClient.prototype, "post").mockRejectedValue(
+      new CursorCancelledError("POST /v1/agents was cancelled by the caller; not dispatched"));
+    try {
+      const client = await connect(fetchImpl, policy(["*"]));
+      const result = await client.callTool({ name: "cursor_create_agent", arguments: {
+        repo: "ExampleOrg/ExampleRepo", prompt: "x",
+      } });
+      expect(result.isError).toBe(true);
+      expect(text(result)).toContain("Requested agentId bc-");
+      expect(text(result)).toContain("not dispatched");
+      expect(text(result)).not.toContain("outcome is unknown");
+      expect(post).toHaveBeenCalledTimes(1);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally { post.mockRestore(); }
+  });
+
+  it.each([400, 403, 429])("keeps a known %s refusal's guidance unchanged", async status => {
+    fetchImpl.mockResolvedValue(json({ error: {
+      code: status === 429 ? "usage_limit_exceeded" : "invalid_request", message: "refused",
+    } }, status));
+    const client = await connect(fetchImpl, policy(["*"]));
+    const result = await client.callTool({ name: "cursor_create_agent", arguments: {
+      repo: "ExampleOrg/ExampleRepo", prompt: "x",
+    } });
+    expect(result.isError).toBe(true);
+    expect(text(result)).not.toContain("Inspect cursor_get_agent with this ID");
+    expect(text(result)).not.toContain("outcome is unknown");
+    if (status === 429) expect(text(result)).toMatch(/^Included Cloud Agent usage is exhausted/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("cancels invalid repository readback before calculating source pinning", async () => {
     fetchImpl.mockImplementation(async input => String(input).endsWith("/cancel")
       ? json({ id: "run-1" })
