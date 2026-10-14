@@ -1873,6 +1873,67 @@ describe("agent status readback", () => {
     });
   });
 
+  describe("reviewer and subagent readback", () => {
+    const getAgent = async (extra: Record<string, unknown>) => {
+      fetchImpl.mockResolvedValue(
+        json({
+          id: "bc-1",
+          status: "IDLE",
+          url: "https://cursor.com/agents/bc-1",
+          createdAt: "t",
+          updatedAt: "t",
+          repos: [{ url: "https://github.com/ExampleOrg/ExampleRepo" }],
+          ...extra,
+        }),
+      );
+      const client = await connect(fetchImpl, policy(["read:*"]));
+      const result = await client.callTool({
+        name: "cursor_get_agent",
+        arguments: { agentId: "bc-1" },
+      });
+      await client.close();
+      return result;
+    };
+
+    it("passes the fields through with subagent names only", async () => {
+      const result = await getAgent({
+        autoCreatePR: true,
+        skipReviewerRequest: true,
+        customSubagents: [
+          { name: "lint", description: "SECRET-DESC", prompt: "SECRET-PROMPT", model: "SECRET-MODEL" },
+          { name: "docs", description: "SECRET-DESC", prompt: "SECRET-PROMPT" },
+        ],
+      });
+      expect(result.structuredContent).toMatchObject({
+        autoCreatePR: true,
+        skipReviewerRequest: true,
+        customSubagents: ["lint", "docs"],
+      });
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain("SECRET-");
+    });
+
+    it("keeps absent upstream fields absent", async () => {
+      const result = await getAgent({});
+      for (const key of ["autoCreatePR", "skipReviewerRequest", "customSubagents"]) {
+        expect(result.structuredContent).not.toHaveProperty(key);
+      }
+    });
+
+    it("keeps false and an empty subagent list as reported", async () => {
+      const result = await getAgent({
+        autoCreatePR: false,
+        skipReviewerRequest: false,
+        customSubagents: [],
+      });
+      expect(result.structuredContent).toMatchObject({
+        autoCreatePR: false,
+        skipReviewerRequest: false,
+        customSubagents: [],
+      });
+    });
+  });
+
   it("filters listed agents whose environment is outside the active profile", async () => {
     fetchImpl.mockResolvedValue(
       json({

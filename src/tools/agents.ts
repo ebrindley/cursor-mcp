@@ -505,6 +505,8 @@ export function registerAgentTools(
         environment: z.string().optional(),
         workOnCurrentBranch: z.boolean().optional(),
         autoCreatePR: z.boolean().optional(),
+        skipReviewerRequest: z.boolean().optional(),
+        customSubagents: z.array(z.string()).optional().describe("Names only; subagent prompts, descriptions, and models are never returned."),
         metadata: z.record(z.string(), z.string()).optional(),
       },
       annotations: READ,
@@ -1766,6 +1768,8 @@ function inspectAgent(agent: Agent): {
   environment?: string;
   workOnCurrentBranch?: boolean;
   autoCreatePR?: boolean;
+  skipReviewerRequest?: boolean;
+  customSubagents?: string[];
   metadata?: Record<string, string>;
 } {
   const environment = agent.env?.name?.trim();
@@ -1783,6 +1787,16 @@ function inspectAgent(agent: Agent): {
       ? {}
       : { workOnCurrentBranch: agent.workOnCurrentBranch }),
     ...(agent.autoCreatePR === undefined ? {} : { autoCreatePR: agent.autoCreatePR }),
+    ...(agent.skipReviewerRequest === undefined
+      ? {}
+      : { skipReviewerRequest: agent.skipReviewerRequest }),
+    // Names only: the rest of a subagent is caller-supplied prompt text.
+    ...(agent.customSubagents === undefined
+      ? {}
+      : {
+          customSubagents: agent.customSubagents.flatMap((subagent) =>
+            subagent.name === undefined ? [] : [subagent.name]),
+        }),
     ...(agent.metadata === undefined ? {} : { metadata: agent.metadata }),
   };
 }
