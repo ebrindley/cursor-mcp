@@ -24,6 +24,8 @@ export const MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024;
 
 const IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
 
+const MIME_TYPE_MESSAGE = `mimeType must be one of ${IMAGE_MIME_TYPES.join(", ")}`;
+
 const Dimension = z
   .object({
     width: z.number().int().min(1).describe("Width in pixels."),
@@ -48,13 +50,27 @@ const DataImage = z
       .describe(
         "Standard base64 bytes (no data: prefix, no whitespace). All inline images in one call total at most 5 MiB decoded.",
       ),
-    mimeType: z.enum(IMAGE_MIME_TYPES),
+    mimeType: z.enum(IMAGE_MIME_TYPES, { error: MIME_TYPE_MESSAGE }),
     dimension: Dimension,
   })
   .strict();
 
 export const PromptImagesInput = z
-  .array(z.union([UrlImage, DataImage]))
+  .array(
+    z.union([UrlImage, DataImage], {
+      // A union reports only "Invalid input", hiding the branch's own message.
+      // Surface the allowed types only when a bad mimeType is the sole problem:
+      // the same object with a valid type must pass the inline-image schema.
+      error: (issue) => {
+        if (issue.code !== "invalid_union") return undefined;
+        const input = issue.input as { mimeType?: unknown } | null;
+        return typeof input?.mimeType === "string" &&
+          DataImage.safeParse({ ...input, mimeType: IMAGE_MIME_TYPES[0] }).success
+          ? MIME_TYPE_MESSAGE
+          : undefined;
+      },
+    }),
+  )
   .max(MAX_PROMPT_IMAGES)
   .optional()
   .describe(

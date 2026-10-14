@@ -15,7 +15,7 @@ import { CapabilityError } from "../lifecycle-model.js";
 import { WorkspaceCapabilityError } from "../workspace-controls.js";
 import type { Policy } from "../config.js";
 import { log } from "../log.js";
-import { capBytes, sanitize, wrap } from "../untrusted.js";
+import { POLICY_REFUSAL_NOTICE, capBytes, sanitize, wrap } from "../untrusted.js";
 import type { z } from "zod";
 
 export interface ToolResult {
@@ -246,6 +246,7 @@ export function fail(error: unknown, policy: Policy): ToolResult {
             "policy refusal",
             error.message,
             policy.maxResponseBytes,
+            POLICY_REFUSAL_NOTICE,
           )}`,
         },
       ],

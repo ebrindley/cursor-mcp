@@ -2039,6 +2039,8 @@ describe("exhausted included usage", () => {
     expect(message).toContain("cursor_tail_run");
     // The upstream message still reaches the caller, fenced as Cursor's text.
     expect(message).toContain("Enable on-demand usage");
+    expect(message).toContain("Untrusted data from the Cursor API.");
+    expect(message).not.toContain("Policy refusal from this server");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
@@ -2506,6 +2508,8 @@ describe("a policy refusal is our sentence with Cursor's words in it", () => {
     expect(block.slice(0, fence)).toBe("Refused by policy:\n");
     const fenced = block.slice(fence);
     expect(fenced).toContain('source="policy refusal"');
+    expect(fenced).toContain("Policy refusal from this server.");
+    expect(fenced).not.toContain("Untrusted data from the Cursor API");
     expect(fenced).toContain("environment ");
     // The instruction is the reason for the envelope: no sanitizer touches it, so
     // it has to arrive somewhere the reader is told to treat it as data.
@@ -3533,6 +3537,32 @@ describe("prompt images", () => {
       expect(result.isError).toBe(true);
       expect(text(result)).not.toContain("secret");
     }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("names the allowed image types when mimeType is not one of them", async () => {
+    const client = await connect(fetchImpl, policy(["*"]));
+    const result = await client.callTool({
+      name: "cursor_create_agent",
+      arguments: { ...repo, images: [{ data: "AAAA", mimeType: "image/bmp" }] },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("image/png, image/jpeg, image/gif, image/webp");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a url image with mimeType", { url: "https://example.com/a.png", mimeType: "image/bmp" }],
+    ["missing data", { mimeType: "image/bmp" }],
+    ["a malformed dimension", { data: "AAAA", mimeType: "image/bmp", dimension: { width: 0, height: 1 } }],
+  ])("does not blame mimeType for %s", async (_label, image) => {
+    const client = await connect(fetchImpl, policy(["*"]));
+    const result = await client.callTool({
+      name: "cursor_create_agent",
+      arguments: { ...repo, images: [image] },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).not.toContain("image/png, image/jpeg, image/gif, image/webp");
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 

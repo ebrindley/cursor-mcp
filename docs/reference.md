@@ -76,7 +76,8 @@ caps its size — and every tool returns through one builder (`src/tools/result.
 there is no second path. That includes error text and `structuredContent`, both of which
 reach the model just as surely as the summary does. `maxResponseBytes` is one budget for
 the whole structured payload, not a per-string limit, and a truncation is always reported
-rather than silent. Required fields are emitted before optional free text, and sanitized
+rather than silent. This server's own policy refusals keep the fence, because they can
+quote values Cursor supplied, but carry a header saying the refusal is this server's. Required fields are emitted before optional free text, and sanitized
 structured output is validated before it reaches the MCP SDK. This reduces
 prompt-injection risk; it
 does not eliminate it. Repository contents, PR text, and agent output are all written by

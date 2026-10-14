@@ -307,6 +307,7 @@ describe("the untrusted-data boundary has no second path", () => {
     // reason names something Cursor reported, so it is inside one.
     expect(block.startsWith("Refused by policy:\n<<<CURSOR_UNTRUSTED")).toBe(true);
     expect(block).toContain('source="policy refusal"');
+    expect(block).toContain("Policy refusal from this server.");
     expect(block).toContain("repo a/b is not in the profile");
     expect(block.trimEnd().endsWith("CURSOR_UNTRUSTED>>>")).toBe(true);
   });
