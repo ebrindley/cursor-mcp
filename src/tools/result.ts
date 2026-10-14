@@ -192,14 +192,70 @@ function walk(value: unknown, budget: Budget): unknown {
   return value;
 }
 
-/** A successful result: fenced summary text plus sanitized structured fields. */
+/** A fenced structured field: the raw text and the label its envelope carries. */
+export interface FencedField {
+  source: string;
+  text: string;
+}
+
+/** UTF-8 bytes of a value as it serializes into structuredContent. */
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+/**
+ * Wrap `field` so its serialized envelope fits in `room` bytes, or return
+ * undefined when even an empty envelope does not.
+ *
+ * `wrap` budgets raw payload bytes, but the client receives the JSON string, and
+ * escaping (newlines, quotes, control characters) inflates it. So the cap is
+ * searched against the serialized size rather than assumed from the raw one. The
+ * envelope keeps its own truncation note, which names the cap actually applied.
+ */
+function fitEnvelope(
+  field: FencedField,
+  limit: number,
+  room: number,
+): string | undefined {
+  const fits = (envelope: string) => jsonBytes(envelope) <= room;
+  const full = wrap(field.source, field.text, limit);
+  if (fits(full)) return full;
+  // Invariant: `best` always fits. A cap of zero is the smallest envelope there is.
+  let best = wrap(field.source, field.text, 0);
+  if (!fits(best)) return undefined;
+  let lo = 0;
+  let hi = limit;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    const candidate = wrap(field.source, field.text, mid);
+    if (fits(candidate)) {
+      best = candidate;
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
+/**
+ * A successful result: fenced summary text plus sanitized structured fields.
+ *
+ * `fenced` carries structured string fields delivered as complete `wrap`
+ * envelopes. They skip `sanitizeDeep`, which would strip the fence markers, but
+ * they are not free: the serialized structured content, envelopes included, stays
+ * within `maxResponseBytes`. Each envelope gets what the other fields leave, with
+ * its payload capped to fit, and is omitted when not even an empty envelope fits.
+ * Callers pass raw text; `wrap` does the sanitizing.
+ */
 export function ok(args: {
   source: string;
   text: string;
   structured: Record<string, unknown>;
+  fenced?: Record<string, FencedField>;
   policy: Policy;
 }): ToolResult {
-  const { source, text, structured, policy } = args;
+  const { source, text, structured, fenced, policy } = args;
   const sanitized = sanitizeDeep(structured, policy.maxResponseBytes);
   const content: Array<{ type: "text"; text: string }> = [
     { type: "text", text: wrap(source, text, policy.maxResponseBytes) },
@@ -214,10 +270,15 @@ export function ok(args: {
         `truncated. Narrow the request to see the rest.`,
     });
   }
-  return {
-    content,
-    structuredContent: sanitized.value as Record<string, unknown>,
-  };
+  const out = { ...(sanitized.value as Record<string, unknown>) };
+  for (const [key, field] of Object.entries(fenced ?? {})) {
+    // Room left once this key and the separator are written, as serialized.
+    const room =
+      policy.maxResponseBytes - jsonBytes(out) - jsonBytes(key) - 2;
+    const envelope = fitEnvelope(field, policy.maxResponseBytes, room);
+    if (envelope !== undefined) out[key] = envelope;
+  }
+  return { content, structuredContent: out };
 }
 
 /**

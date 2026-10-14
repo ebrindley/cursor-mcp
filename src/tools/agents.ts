@@ -81,7 +81,7 @@ import {
 import { capBytes, sanitize } from "../untrusted.js";
 import { CANCEL, CREATE, READ } from "./annotations.js";
 import { defineTool } from "./register.js";
-import { ok, structuredCost } from "./result.js";
+import { ok, structuredCost, type FencedField } from "./result.js";
 
 const FollowUpSchema = z.enum(["accepted", "refused", "unknown"]);
 
@@ -586,7 +586,7 @@ export function registerAgentTools(
     config: {
       title: "Cursor Cloud: get run",
       description:
-        "Inspect one run: status, duration, reported branch or PR, and the final reply once it has finished.",
+        "Inspect one run: status, duration, reported branch or PR, and the fenced final reply (text and `reply`) once finished.",
       inputSchema: { agentId: AgentId, runId: RunIdArg },
       outputSchema: RUN_OUT,
       annotations: READ,
@@ -597,10 +597,12 @@ export function registerAgentTools(
         `/v1/agents/${seg(args.agentId)}/runs/${seg(args.runId)}`,
         RunSchema,
       );
+      const source = `GET /v1/agents/${args.agentId}/runs/${args.runId}`;
       return ok({
-        source: `GET /v1/agents/${args.agentId}/runs/${args.runId}`,
+        source,
         text: runText(run),
         structured: runStructured(run),
+        fenced: runReply(source, run),
         policy,
       });
     },
@@ -880,7 +882,7 @@ export function registerAgentTools(
     config: {
       title: "Cursor Cloud: wait for run",
       description:
-        `Poll one run until it is terminal or waitMs elapses (default ${DEFAULT_RUN_WAIT_MS / 1000}s, maximum ${MAX_RUN_WAIT_MS / 1000}s). Returns what cursor_get_run returns plus timedOut; call again to keep waiting.`,
+        `Poll one run until it is terminal or waitMs elapses (default ${DEFAULT_RUN_WAIT_MS / 1000}s, maximum ${MAX_RUN_WAIT_MS / 1000}s). Returns cursor_get_run's result plus timedOut; call again to keep waiting.`,
       inputSchema: {
         agentId: AgentId,
         runId: RunIdArg,
@@ -932,8 +934,9 @@ export function registerAgentTools(
       let polls = 0;
       const finish = (run: Run, timedOut: boolean) => {
         const elapsedMs = Math.round(hooks.now() - started);
+        const source = `GET ${path} (polled ${polls}x)`;
         return ok({
-          source: `GET ${path} (polled ${polls}x)`,
+          source,
           text: [
             runText(run),
             timedOut
@@ -941,6 +944,7 @@ export function registerAgentTools(
               : `terminal after ${elapsedMs}ms`,
           ].join("\n"),
           structured: { ...runStructured(run), timedOut, polls, elapsedMs },
+          fenced: runReply(source, run),
           policy,
         });
       };
@@ -1460,10 +1464,15 @@ function repoDetails(agent: Agent): RepoDetailOut[] {
 /**
  * The structured shape of a run, shared by get and wait.
  *
- * The final reply is deliberately absent. It is free text written by the agent
- * from repository and PR content, so it travels only inside the fenced `content`
- * block; `structuredContent` carries its size so a caller can tell "no reply yet"
- * from "an empty reply" without a second unfenced copy of the text.
+ * The final reply is free text written by the agent from repository and PR
+ * content, so it never appears raw: `resultBytes` says how large it is, which
+ * lets a caller tell "no reply yet" from "an empty reply", and `reply` carries it
+ * only as the same `wrap` envelope the text content holds. The copy is
+ * duplicated on purpose. A client that has an output schema may show the model
+ * `structuredContent` instead of `content`, and without it the reply would never
+ * arrive. The fence and its label travel with the copy, so that path is no less
+ * guarded than the text one. The copy is capped so the whole serialized
+ * structured result stays within `maxResponseBytes`; its truncation note says so.
  */
 const RUN_OUT = {
   id: z.string(),
@@ -1471,6 +1480,12 @@ const RUN_OUT = {
   terminal: z.boolean(),
   durationMs: z.number().optional(),
   resultBytes: z.number().int().optional(),
+  reply: z
+    .string()
+    .optional()
+    .describe(
+      "The run's final reply inside an untrusted-data fence, as in the text content. Absent until the run has one.",
+    ),
   branches: z.array(
     z.object({
       repoUrl: z.string(),
@@ -1479,6 +1494,11 @@ const RUN_OUT = {
     }),
   ),
 };
+
+/** The fenced `reply` field for a run, or nothing when it has no reply yet. */
+function runReply(source: string, run: Run): Record<string, FencedField> {
+  return run.result === undefined ? {} : { reply: { source, text: run.result } };
+}
 
 function runStructured(run: Run): {
   id: string;

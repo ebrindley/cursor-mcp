@@ -493,9 +493,11 @@ well under the client's request timeout (default 30 s, maximum 45 s) and reports
 launching again. `cursor_get_run` is the single-shot form. Every run carries a `terminal`
 boolean so a caller does not have to know the status enum, and an unrecognised future
 status reads as non-terminal rather than failing the response. The agent's final reply is
-in the fenced text block only; `structuredContent` carries `resultBytes`, never the reply
-itself, so hosts that read structured output do not receive a second, unfenced copy of
-third-party text. Branch metadata is agent-level state; only a `prUrl` proves that a run
+in the fenced text block, and `structuredContent` carries `resultBytes` and a `reply`
+field holding the same fenced, labelled envelope under the same byte budget, because a
+host that has an output schema may show the model structured output instead of the text.
+`reply` is absent when the run has no result, and the raw reply never appears unfenced in
+structured output. Branch metadata is agent-level state; only a `prUrl` proves that a run
 pushed work to the remote.
 
 **Archive is list hygiene.** Do not use it as a capacity-control operation.
