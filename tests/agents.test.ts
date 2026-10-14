@@ -1332,6 +1332,136 @@ describe("cursor_create_agent", () => {
     });
   });
 
+  describe("customSubagents", () => {
+    const sub = (name: string, extra: Record<string, unknown> = {}) => ({
+      name,
+      description: `${name} helper`,
+      prompt: `SECRET-PROMPT-${name}`,
+      ...extra,
+    });
+    const launch = (customSubagents: unknown, p: Policy = policy(["*"])) =>
+      connect(fetchImpl, p).then((client) =>
+        client.callTool({
+          name: "cursor_create_agent",
+          arguments: { repo: "ExampleOrg/ExampleRepo", prompt: "x", customSubagents },
+        }));
+    const sentBody = () =>
+      JSON.parse(String((fetchImpl.mock.calls[0]![1] as RequestInit).body));
+
+    it("forwards subagents verbatim and leaves the body unchanged when omitted or empty", async () => {
+      fetchImpl.mockResolvedValue(json(createdPayload()));
+      const subagents = [
+        sub("frontend-reviewer", { model: "inherit" }),
+        sub("tester", { model: { id: "composer-2", params: [{ id: "thinking", value: "high" }] } }),
+        sub("plain"),
+      ];
+      await launch(subagents);
+      expect(sentBody().customSubagents).toEqual(subagents);
+
+      fetchImpl.mockClear();
+      await launch(undefined);
+      expect(sentBody()).not.toHaveProperty("customSubagents");
+      fetchImpl.mockClear();
+      await launch([]);
+      expect(sentBody()).not.toHaveProperty("customSubagents");
+    });
+
+    it("accepts 20 subagents and refuses 21 before any request", async () => {
+      fetchImpl.mockResolvedValue(json(createdPayload()));
+      const names = Array.from({ length: 21 }, (_, i) => `sub-${i}`);
+      const refused = await launch(names.map((n) => sub(n)));
+      expect(refused.isError).toBe(true);
+      expect(fetchImpl).not.toHaveBeenCalled();
+      const accepted = await launch(names.slice(0, 20).map((n) => sub(n)));
+      expect(accepted.isError).not.toBe(true);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses schema violations before any request", async () => {
+      for (const bad of [
+        sub(""),
+        sub("n".repeat(101)),
+        { ...sub("a"), description: "" },
+        { ...sub("a"), description: "d".repeat(1001) },
+        { ...sub("a"), prompt: "" },
+        { ...sub("a"), prompt: "p".repeat(8193) },
+        { ...sub("a"), extra: true },
+        { name: "a", description: "d" },
+      ]) {
+        expect((await launch([bad])).isError).toBe(true);
+      }
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it("refuses duplicate and built-in names before any request", async () => {
+      const dup = await launch([sub("a"), sub("a")]);
+      expect(dup.isError).toBe(true);
+      expect(text(dup)).toContain("is duplicated");
+      for (const builtIn of ["explore", "shell", "debug", "computerUse", "cursorGuide"]) {
+        const result = await launch([sub(builtIn)]);
+        expect(result.isError).toBe(true);
+        expect(text(result)).toContain("collides with a built-in");
+      }
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it("refuses an empty model parameter value before any request", async () => {
+      const result = await launch([{ ...sub("a"), model: { id: "composer-2", params: [{ id: "thinking", value: "" }] } }]);
+      expect(result.isError).toBe(true);
+      expect(text(result)).toContain("model parameter values must be non-empty");
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it("keeps a profile model pin: only inherit, omitted, or the pinned model are allowed", async () => {
+      fetchImpl.mockResolvedValue(json(createdPayload()));
+      const p = policy(["*"]);
+      p.profiles.p!.model = "grok-4.6";
+      const denied = await launch([sub("a", { model: "other" })], p);
+      expect(denied.isError).toBe(true);
+      expect(text(denied)).toContain('customSubagents "a"');
+      expect(text(denied)).toContain("pins model to grok-4.6");
+      expect(fetchImpl).not.toHaveBeenCalled();
+      const allowed = await launch(
+        [sub("a", { model: "inherit" }), sub("b"), sub("c", { model: { id: "grok-4.6" } })],
+        p,
+      );
+      expect(allowed.isError).not.toBe(true);
+      expect(sentBody().customSubagents).toHaveLength(3);
+    });
+
+    it("reports names and a verdict from readback without echoing prompts", async () => {
+      const requested = [sub("a"), sub("b")];
+      fetchImpl.mockResolvedValue(
+        json(createdPayload({ customSubagents: [{ name: "b", prompt: "SECRET-PROMPT-b" }, { name: "a" }] })),
+      );
+      const matched = await launch(requested);
+      expect(matched.structuredContent).toMatchObject({
+        customSubagentsRequested: ["a", "b"],
+        customSubagentsVerified: true,
+      });
+      expect(JSON.stringify(matched)).not.toContain("SECRET-PROMPT");
+
+      fetchImpl.mockResolvedValue(json(createdPayload({ customSubagents: [{ name: "a" }] })));
+      const differs = await launch(requested);
+      expect(differs.isError).not.toBe(true);
+      expect(differs.structuredContent).toMatchObject({ customSubagentsVerified: false });
+      expect(text(differs)).toContain("returned names differ");
+      expect(JSON.stringify(differs)).not.toContain("SECRET-PROMPT");
+
+      fetchImpl.mockResolvedValue(json(createdPayload()));
+      const silent = await launch(requested);
+      expect(silent.structuredContent).toMatchObject({ customSubagentsRequested: ["a", "b"] });
+      expect(silent.structuredContent).not.toHaveProperty("customSubagentsVerified");
+    });
+
+    it("reports no subagent fields when none were requested", async () => {
+      fetchImpl.mockResolvedValue(json(createdPayload({ customSubagents: [{ name: "a" }] })));
+      const result = await launch(undefined);
+      expect(result.structuredContent).not.toHaveProperty("customSubagentsRequested");
+      expect(result.structuredContent).not.toHaveProperty("customSubagentsVerified");
+    });
+  });
+
   it("does not expose provider credential fields on the launch tool", async () => {
     const client = await connect(fetchImpl, policy(["*"]));
     const { tools } = await client.listTools();

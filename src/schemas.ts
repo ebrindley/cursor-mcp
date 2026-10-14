@@ -89,6 +89,8 @@ export const AgentSchema = z.looseObject({
   skipReviewerRequest: z.boolean().optional(),
   workOnCurrentBranch: z.boolean().optional(),
   metadata: z.record(z.string(), z.string()).optional(),
+  /** Echoed custom subagents; only names are compared, prompts are never surfaced. */
+  customSubagents: z.array(z.looseObject({ name: z.string().optional() })).optional(),
   latestRunId: z.string().optional(),
 });
 

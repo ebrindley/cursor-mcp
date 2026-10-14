@@ -171,6 +171,18 @@ request otherwise. Omitted, it is omitted from the body. The result reports the 
 `skipReviewerRequest` and `skipReviewerRequestVerified` (true when the returned agent echoes it,
 false on a different value, absent when Cursor did not echo it; a mismatch is reported, not an error).
 
+`cursor_create_agent` accepts optional `customSubagents` (up to 20; create only, not on
+`cursor_create_run`), forwarded in the `POST /v1/agents` body per the published
+CustomSubagent schema: `name` (1-100, unique, not `explore`, `shell`, `debug`,
+`computerUse`, `cursorGuide`; matched exactly), `description` (1-1000), `prompt`
+(1-8192), and optional `model` (`inherit`, a model id, or a selection with params).
+Violations are refused before any request. A profile model pin applies to an explicit
+subagent `model`: only `inherit` or the pinned selection is accepted; an omitted model
+is left to Cursor. Results report `customSubagentsRequested` (names only; prompts are
+never echoed) and `customSubagentsVerified`, true when the returned names match the
+requested set, false when they differ (reported, not an error), omitted when Cursor
+did not echo them.
+
 ## Configuration
 
 | Variable | Purpose |

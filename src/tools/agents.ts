@@ -36,7 +36,7 @@ import {
 } from "../client.js";
 import type { GateableConfig, ToolSpec } from "./register.js";
 import type { Policy } from "../config.js";
-import { activeProfile } from "../config.js";
+import { activeProfile, type Profile } from "../config.js";
 import { USAGE_LIMITED_CLASS } from "../api-errors.js";
 import {
   CursorApiError,
@@ -118,6 +118,53 @@ const LaunchRepoInput = z.object({
     .describe("Branch or commit to start from for this repository."),
   prUrl: PrUrlArg.optional(),
 });
+
+/** Subagent names Cursor reserves; matched exactly, as the contract states no case folding. */
+const BUILT_IN_SUBAGENTS = ["explore", "shell", "debug", "computerUse", "cursorGuide"] as const;
+
+/** Mirrors the published CustomSubagent schema; `model` is a string (incl. `inherit`) or a selection. */
+const CustomSubagentInput = z.strictObject({
+  name: z.string().min(1).max(100).describe("Unique within customSubagents; not a built-in (explore, shell, debug, computerUse, cursorGuide)."),
+  description: z.string().min(1).max(1000).describe("Short summary the main agent uses to decide when to delegate."),
+  prompt: z.string().min(1).max(8192).describe("System prompt the subagent receives."),
+  model: ModelInputSchema.refine(
+    (model) => typeof model === "string" || (model.params ?? []).every((param) => param.value.length > 0),
+    "model parameter values must be non-empty",
+  ).optional().describe("`inherit`, a model id, or a selection with params. Omit to leave Cursor's default. A profile model pin allows only `inherit` or the pinned selection."),
+});
+type CustomSubagent = z.infer<typeof CustomSubagentInput>;
+
+const CustomSubagentsInput = z
+  .array(CustomSubagentInput)
+  .max(20)
+  .superRefine((subagents, ctx) => {
+    const seen = new Set<string>();
+    subagents.forEach((subagent, index) => {
+      const issue = (message: string) =>
+        ctx.addIssue({ code: "custom", message, path: [index, "name"] });
+      if ((BUILT_IN_SUBAGENTS as readonly string[]).includes(subagent.name)) {
+        issue(`customSubagents name "${subagent.name}" collides with a built-in subagent`);
+      } else if (seen.has(subagent.name)) {
+        issue(`customSubagents name "${subagent.name}" is duplicated`);
+      }
+      seen.add(subagent.name);
+    });
+  });
+
+/** An explicit subagent model may not step around a profile model pin; `inherit` and an omitted model follow the supervisor. */
+function assertSubagentModels(profile: Profile | undefined, subagents: readonly CustomSubagent[]): void {
+  for (const subagent of subagents) {
+    if (subagent.model === undefined || subagent.model === "inherit") continue;
+    try {
+      resolveModel(profile, subagent.model);
+    } catch (error) {
+      if (error instanceof PolicyError) {
+        throw new PolicyError(`customSubagents "${subagent.name}": ${error.message}`);
+      }
+      throw error;
+    }
+  }
+}
 
 const AgentId = z
   .string()
@@ -1064,6 +1111,7 @@ export function registerAgentTools(
           .optional()
           .describe("Skip requesting the user as a reviewer on the PR Cursor opens. Only applies when autoCreatePR resolves true; true is rejected otherwise."),
         mode: z.enum(["agent", "plan"]).optional(),
+        customSubagents: CustomSubagentsInput.optional().describe("Up to 20 subagents the main agent can delegate to, set at creation only. Prompts are not echoed in results."),
       },
       outputSchema: {
         agentId: z.string(),
@@ -1092,6 +1140,8 @@ export function registerAgentTools(
           .boolean()
           .optional()
           .describe("Whether the returned agent echoed the requested value; omitted when Cursor did not echo it."),
+        customSubagentsRequested: z.array(z.string()).optional().describe("Names of the requested custom subagents."),
+        customSubagentsVerified: z.boolean().optional().describe("Returned subagent names match the requested set; omitted when Cursor did not echo them."),
       },
       annotations: CREATE,
     },
@@ -1111,6 +1161,7 @@ export function registerAgentTools(
       autoCreatePR?: boolean;
       skipReviewerRequest?: boolean;
       mode?: "agent" | "plan";
+      customSubagents?: CustomSubagent[];
     }) => {
       const launch = resolveCreateAgentLaunch(profile, args);
       const autoCreatePR = resolveAutoCreatePR(profile, args.autoCreatePR);
@@ -1123,6 +1174,11 @@ export function registerAgentTools(
       // not forwarded there and no readback is claimed for it.
       const skipReviewerRequest = autoCreatePR ? args.skipReviewerRequest : undefined;
       const model = resolveModel(profile, args.model);
+      const customSubagents =
+        args.customSubagents === undefined || args.customSubagents.length === 0
+          ? undefined
+          : args.customSubagents;
+      if (customSubagents !== undefined) assertSubagentModels(profile, customSubagents);
       const metadata =
         args.metadata === undefined || Object.keys(args.metadata).length === 0
           ? undefined
@@ -1153,6 +1209,7 @@ export function registerAgentTools(
             ...(args.mode === undefined ? {} : { mode: args.mode }),
             ...(metadata === undefined ? {} : { metadata }),
             ...(skipReviewerRequest === undefined ? {} : { skipReviewerRequest }),
+            ...(customSubagents === undefined ? {} : { customSubagents }),
           },
         }),
       ));
@@ -1210,6 +1267,15 @@ export function registerAgentTools(
         skipReviewerRequest === undefined || created.agent.skipReviewerRequest === undefined
           ? undefined
           : created.agent.skipReviewerRequest === skipReviewerRequest;
+      const requestedSubagentNames = customSubagents?.map((subagent) => subagent.name);
+      const returnedSubagents = created.agent.customSubagents;
+      // Set comparison on names only: Cursor may reorder, and prompts are caller text.
+      const customSubagentsVerified =
+        requestedSubagentNames === undefined || returnedSubagents === undefined
+          ? undefined
+          : returnedSubagents.length === requestedSubagentNames.length &&
+            requestedSubagentNames.every((name) =>
+              returnedSubagents.some((returned) => returned.name === name));
       return ok({
         source: "POST /v1/agents",
         text: [
@@ -1229,6 +1295,9 @@ export function registerAgentTools(
             : []),
           ...(skipReviewerRequestVerified === false
             ? ["skipReviewerRequest readback differs from the requested value"]
+            : []),
+          ...(customSubagentsVerified === false
+            ? ["customSubagents were requested but the returned names differ from the request"]
             : []),
         ].join("\n"),
         structured: {
@@ -1257,6 +1326,10 @@ export function registerAgentTools(
           ...(metadataVerified === undefined ? {} : { metadataVerified }),
           ...(skipReviewerRequest === undefined ? {} : { skipReviewerRequest }),
           ...(skipReviewerRequestVerified === undefined ? {} : { skipReviewerRequestVerified }),
+          ...(requestedSubagentNames === undefined
+            ? {}
+            : { customSubagentsRequested: requestedSubagentNames }),
+          ...(customSubagentsVerified === undefined ? {} : { customSubagentsVerified }),
         },
         policy,
       });
