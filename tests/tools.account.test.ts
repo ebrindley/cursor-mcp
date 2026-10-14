@@ -336,7 +336,7 @@ describe("workspace control catalog", () => {
     const supportedIds = (
       supported.structuredContent as { controls: Array<{ id: string }> }
     ).controls.map((entry) => entry.id);
-    expect(supportedIds).toEqual(["identity", "models", "repositories"]);
+    expect(supportedIds).toEqual(["identity", "models", "repositories", "secrets"]);
 
     const unverified = await client.callTool({
       name: "cursor_list_workspace_controls",
@@ -346,7 +346,7 @@ describe("workspace control catalog", () => {
       unverified.structuredContent as { controls: Array<{ id: string }> }
     ).controls.map((entry) => entry.id);
     expect(unverifiedIds).toContain("network-policy");
-    expect(unverifiedIds).toContain("secrets");
+    expect(unverifiedIds).not.toContain("secrets");
     expect(unverifiedIds).not.toContain("identity");
 
     const unsupported = await client.callTool({
@@ -516,4 +516,334 @@ it("exposes model parameter and variant metadata only when requested", async () 
   fetchImpl.mockResolvedValue(json({items: [{...entry, parameters: null}]}));
   const compact = await client.callTool({name: "cursor_list_models"});
   expect(compact.structuredContent).toEqual({models: [entry.id]});
+});
+
+describe("secrets inventory", () => {
+  const ENV_ID = "8f14e45f-ceea-4e6b-9c3a-1d2e3f4a5b6c";
+  const version = (name: string, extra: Record<string, unknown> = {}) => ({
+    id: "secv_3qKx9mT2bV7nR1cW5yZ8aQ",
+    name,
+    type: "runtime_secret",
+    repos: ["github.com/acme/api"],
+    createdAt: "2026-10-01T09:15:42.000Z",
+    ...extra,
+  });
+  const profilePolicy = (profile: Record<string, unknown> = {}): Policy => ({
+    deleteEnabled: false,
+    activationEnabled: false,
+    defaultProfile: "p",
+    maxResponseBytes: 32_768,
+    profiles: {
+      p: {
+        repos: ["*"],
+        tools: ["*"],
+        environments: [{ name: "dev", publicId: ENV_ID, scope: "team" }],
+        ...profile,
+      },
+    },
+  });
+  const environment = {
+    id: ENV_ID,
+    name: "dev",
+    owner: "team",
+    repos: [{ url: "https://github.com/acme/api" }],
+    createdAt: "2026-10-01T00:00:00Z",
+    updatedAt: "2026-10-01T00:00:00Z",
+  };
+  const get = (client: Client, args: Record<string, unknown>) =>
+    client.callTool({
+      name: "cursor_get_workspace_control",
+      arguments: { control: "secrets", ...args },
+    });
+  const urls = () => fetchImpl.mock.calls.map((call) => String(call[0]));
+  type Inventory = {
+    items: Array<Record<string, unknown>>;
+    complete: boolean;
+    pages: number;
+    nextCursor?: string;
+    stoppedBecause?: string;
+  };
+  const inventoryOf = (result: unknown) =>
+    (result as { structuredContent: { inventory: Inventory } }).structuredContent.inventory;
+
+  it("requires a scope and makes no request without one", async () => {
+    const client = await connect(fetchImpl, profilePolicy());
+    const result = await get(client, {});
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ status: "supported", control: "secrets" });
+    expect(result.structuredContent).not.toHaveProperty("inventory");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("lists team secrets from /v1/team/secrets without values", async () => {
+    fetchImpl.mockResolvedValue(
+      json({
+        items: [
+          version("NPM_TOKEN", { value: "npm_live_s3cret", token: "t0ken", secrets: { A: "s3cret" }, env: { B: "s3cret" } }),
+          version("DB_URL", { type: "environment_variable", repos: [] }),
+        ],
+        nextCursor: null,
+      }),
+    );
+    const client = await connect(fetchImpl, profilePolicy());
+    const result = await get(client, { scope: "team" });
+    expect(result.isError).toBeFalsy();
+    expect(urls()).toEqual(["https://api.example.test/v1/team/secrets"]);
+    const inventory = inventoryOf(result);
+    expect(inventory).toMatchObject({ scope: "team", complete: true, pages: 1, returned: 2 });
+    expect(inventory.items[0]).toEqual({
+      name: "NPM_TOKEN",
+      type: "runtime_secret",
+      versionId: "secv_3qKx9mT2bV7nR1cW5yZ8aQ",
+      repos: ["github.com/acme/api"],
+      createdAt: "2026-10-01T09:15:42.000Z",
+      owner: { kind: "team" },
+    });
+    expect(inventory.items[1]).toMatchObject({ name: "DB_URL", repos: [] });
+    const wire = JSON.stringify(result);
+    for (const leaked of ["npm_live_s3cret", "t0ken", "s3cret"]) expect(wire).not.toContain(leaked);
+    const text = (result.content as Array<{ text: string }>)[0]!.text;
+    expect(text).toContain("NPM_TOKEN");
+  });
+
+  it("reads an environment by profile name after checking it against the profile", async () => {
+    fetchImpl.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith(`/v1/environments/${ENV_ID}`)) return json(environment);
+      if (url.endsWith(`/v1/environments/${ENV_ID}/secrets`)) {
+        return json({ items: [version("API_KEY")], nextCursor: null });
+      }
+      return json({ error: "unexpected" }, 500);
+    });
+    const client = await connect(fetchImpl, profilePolicy());
+    const result = await get(client, { scope: "environment", environment: "dev" });
+    expect(result.isError).toBeFalsy();
+    expect(urls()).toEqual([
+      `https://api.example.test/v1/environments/${ENV_ID}`,
+      `https://api.example.test/v1/environments/${ENV_ID}/secrets`,
+    ]);
+    const inventory = inventoryOf(result);
+    expect(inventory.items[0]).toMatchObject({
+      name: "API_KEY",
+      owner: { kind: "environment", environmentPublicId: ENV_ID },
+    });
+  });
+
+  it("refuses an environment the profile does not name, before listing secrets", async () => {
+    const client = await connect(fetchImpl, profilePolicy());
+    const result = await get(client, { scope: "environment", environment: "prod" });
+    expect(result.isError).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    // An id the profile does not pin is read and checked; it never reaches the secrets endpoint.
+    fetchImpl.mockResolvedValue(json({ ...environment, id: "other-id", name: "prod" }));
+    const byId = await get(client, { scope: "environment", environmentPublicId: "other-id" });
+    expect(byId.isError).toBe(true);
+    expect(urls()).toEqual(["https://api.example.test/v1/environments/other-id"]);
+  });
+
+  it("refuses an environment read in read-only mode without a profile", async () => {
+    const client = await connect(fetchImpl, READ_ONLY_POLICY);
+    const result = await get(client, { scope: "environment", environment: "dev" });
+    expect(result.isError).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("rejects environment arguments on team scope", async () => {
+    const client = await connect(fetchImpl, profilePolicy());
+    const result = await get(client, { scope: "team", environment: "dev" });
+    expect(result.isError).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("requires the explicit opt-in and an account-access profile for account scope", async () => {
+    const named = await connect(fetchImpl, profilePolicy());
+    const noOptIn = await get(named, { scope: "account" });
+    expect(noOptIn.isError).toBe(true);
+    expect((noOptIn.content as Array<{ text: string }>)[0]!.text).toContain("allowAccountWide");
+    const namedOnly = await get(named, { scope: "account", allowAccountWide: true });
+    expect(namedOnly.isError).toBe(true);
+    const readOnly = await connect(fetchImpl, READ_ONLY_POLICY);
+    expect((await get(readOnly, { scope: "account", allowAccountWide: true })).isError).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("lists account-wide secrets with owners and follows cursors through an empty page", async () => {
+    const pages = [
+      { items: [version("A", { owner: { type: "team" } })], nextCursor: "c1" },
+      { items: [], nextCursor: "c2" },
+      {
+        items: [
+          version("B", { owner: { type: "user", user: { email: "ada@acme.com" } } }),
+          version("C", { owner: { type: "environment", environmentId: ENV_ID } }),
+        ],
+        nextCursor: null,
+      },
+    ];
+    let call = 0;
+    fetchImpl.mockImplementation(async () => json(pages[call++]));
+    const client = await connect(fetchImpl, profilePolicy({ environmentAccess: "account" }));
+    const result = await get(client, { scope: "account", allowAccountWide: true });
+    expect(result.isError).toBeFalsy();
+    expect(urls()).toEqual([
+      "https://api.example.test/v1/secrets?limit=50",
+      "https://api.example.test/v1/secrets?limit=50&cursor=c1",
+      "https://api.example.test/v1/secrets?limit=50&cursor=c2",
+    ]);
+    const inventory = inventoryOf(result);
+    expect(inventory).toMatchObject({ complete: true, pages: 3 });
+    expect(inventory.items.map((item) => item.name)).toEqual(["A", "B", "C"]);
+    expect(inventory.items[1]).toMatchObject({ owner: { kind: "user", userEmail: "ada@acme.com" } });
+    expect(inventory.items[2]).toMatchObject({ owner: { kind: "environment", environmentPublicId: ENV_ID } });
+  });
+
+  it("stops at the page cap and returns a continuation cursor", async () => {
+    let call = 0;
+    fetchImpl.mockImplementation(async () =>
+      json({ items: [version(`S${call}`, { owner: { type: "team" } })], nextCursor: `c${++call}` }),
+    );
+    const client = await connect(fetchImpl, profilePolicy({ environmentAccess: "account" }));
+    const result = await get(client, { scope: "account", allowAccountWide: true });
+    expect(result.isError).toBeFalsy();
+    const inventory = inventoryOf(result);
+    expect(inventory).toMatchObject({ complete: false, pages: 20, stoppedBecause: "page_cap", nextCursor: "c20" });
+    expect(result.structuredContent).toMatchObject({ reason: expect.stringContaining("cursor=c20") });
+    // The continuation resumes where the first call stopped.
+    fetchImpl.mockClear();
+    fetchImpl.mockResolvedValue(json({ items: [], nextCursor: null }));
+    const resumed = await get(client, { scope: "account", allowAccountWide: true, cursor: "c20" });
+    expect(urls()).toEqual(["https://api.example.test/v1/secrets?limit=50&cursor=c20"]);
+    expect(inventoryOf(resumed)).toMatchObject({ complete: true, resumed: true });
+  });
+
+  it("returns a valid bounded result with a lossless continuation when pages outgrow maxResponseBytes", async () => {
+    const page = (n: number, next: string | null) => ({
+      items: Array.from({ length: 50 }, (_, i) =>
+        version(`SECRET_NAME_${String(n * 50 + i).padStart(4, "0")}`, { owner: { type: "team" } }),
+      ),
+      nextCursor: next,
+    });
+    // Ten pages of 50 cannot fit in 32,768 bytes, and the last page is terminal.
+    fetchImpl.mockImplementation(async (input) => {
+      const cursor = new URL(String(input)).searchParams.get("cursor");
+      const n = cursor === null ? 0 : Number(cursor.slice(1));
+      return json(page(n, n === 9 ? null : `c${n + 1}`));
+    });
+    const client = await connect(fetchImpl, profilePolicy({ environmentAccess: "account" }));
+    const result = await get(client, { scope: "account", allowAccountWide: true });
+    expect(result.isError).toBeFalsy();
+    // One text part: ok() added no truncation note, so no required field was cut.
+    expect(result.content as unknown[]).toHaveLength(1);
+    const first = inventoryOf(result);
+    expect(first).toMatchObject({ complete: false, stoppedBecause: "size_budget" });
+    expect(first.items.length).toBeGreaterThan(0);
+    expect(first.items.length % 50).toBe(0);
+    expect(first.nextCursor).toBeDefined();
+    // The cursor refetches the page that was left out, so nothing is skipped.
+    const names = first.items.map((item) => item.name);
+    expect(names).toEqual(Array.from({ length: names.length }, (_, i) => `SECRET_NAME_${String(i).padStart(4, "0")}`));
+    const resumed = await get(client, { scope: "account", allowAccountWide: true, cursor: first.nextCursor });
+    expect(resumed.isError).toBeFalsy();
+    expect(inventoryOf(resumed).items[0]).toMatchObject({ name: `SECRET_NAME_${String(names.length).padStart(4, "0")}` });
+  });
+
+  it("returns a bounded prefix and counts omissions when one unpaginated list is over budget", async () => {
+    fetchImpl.mockResolvedValue(
+      json({
+        items: Array.from({ length: 300 }, (_, i) => version(`TEAM_SECRET_${i}`)),
+        nextCursor: null,
+      }),
+    );
+    const client = await connect(fetchImpl, profilePolicy());
+    const result = await get(client, { scope: "team" });
+    expect(result.isError).toBeFalsy();
+    // One text part: ok() added no truncation note, so no required field was cut.
+    expect(result.content as unknown[]).toHaveLength(1);
+    const inventory = inventoryOf(result) as Inventory & { omitted?: number; returned: number };
+    expect(inventory).toMatchObject({ complete: false, stoppedBecause: "size_budget" });
+    expect(inventory.omitted).toBeGreaterThan(0);
+    expect(inventory.returned + (inventory.omitted ?? 0)).toBe(300);
+    expect(inventory.nextCursor).toBeUndefined();
+  });
+
+  it.each([
+    [480, "small"],
+    [1024, "fits"],
+    [2048, "fits"],
+  ])("handles a tiny maxResponseBytes of %i with a valid result, never a schema failure", async (bytes, outcome) => {
+    fetchImpl.mockResolvedValue(json({ items: [version("ONLY_SECRET")], nextCursor: null }));
+    const client = await connect(fetchImpl, { ...profilePolicy(), maxResponseBytes: bytes });
+    const result = await get(client, { scope: "team" });
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as { status: string; reason?: string; inventory?: Inventory };
+    expect(structured.status).toBe("supported");
+    if (outcome === "fits") {
+      expect(structured.inventory).toMatchObject({ complete: true, returned: 1 });
+      expect(structured.inventory?.items[0]).toMatchObject({ name: "ONLY_SECRET" });
+      expect(structured.inventory).not.toHaveProperty("omitted");
+    } else {
+      expect(structured).not.toHaveProperty("inventory");
+      expect(structured.reason).toContain("maxResponseBytes");
+    }
+    // Neither case needed ok() to truncate anything.
+    expect(result.content as unknown[]).toHaveLength(1);
+  });
+
+  it.each([
+    ["omitted", {}],
+    ["empty", { nextCursor: "" }],
+  ])("treats a %s nextCursor as a contract error, never as a complete list", async (_label, cursorField) => {
+    fetchImpl.mockResolvedValue(json({ items: [version("A")], ...cursorField }));
+    const client = await connect(fetchImpl, profilePolicy());
+    const result = await get(client, { scope: "team" });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+  });
+
+  it.each([
+    ["feature_unavailable", "unavailable-on-plan"],
+    ["key_not_supported", "unsupported"],
+    ["repository_access", "unavailable-on-plan"],
+    ["team_membership_required", "unavailable-on-plan"],
+    ["team_admin_required", "unavailable-on-plan"],
+    ["user_required", "unavailable-on-plan"],
+  ])("maps a 403 %s to an explicit %s result", async (code, status) => {
+    fetchImpl.mockResolvedValue(json({ error: { code, message: "upstream words" } }, 403));
+    const client = await connect(fetchImpl, profilePolicy());
+    const result = await get(client, { scope: "team" });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ status, control: "secrets", apiErrorCode: code });
+    expect(result.structuredContent).not.toHaveProperty("inventory");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("upstream words");
+  });
+
+  it("maps a 404 environment_not_found to a capability result", async () => {
+    fetchImpl.mockImplementation(async (input) =>
+      String(input).endsWith("/secrets")
+        ? json({ error: { code: "environment_not_found", message: "gone" } }, 404)
+        : json(environment),
+    );
+    const client = await connect(fetchImpl, profilePolicy());
+    const result = await get(client, { scope: "environment", environment: "dev" });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      status: "unavailable-on-plan",
+      apiErrorCode: "environment_not_found",
+    });
+  });
+
+  it("still throws on an undocumented error", async () => {
+    fetchImpl.mockResolvedValue(json({ error: { code: "mystery", message: "x" } }, 403));
+    const client = await connect(fetchImpl, profilePolicy());
+    expect((await get(client, { scope: "team" })).isError).toBe(true);
+  });
+
+  it("advertises the secrets arguments and no value or write argument", async () => {
+    const client = await connect(fetchImpl);
+    const tool = (await client.listTools()).tools.find((t) => t.name === "cursor_get_workspace_control")!;
+    const props = Object.keys(tool.inputSchema.properties ?? {});
+    expect(props).toEqual(
+      expect.arrayContaining(["scope", "environment", "environmentPublicId", "allowAccountWide", "cursor"]),
+    );
+    expect(props.some((key) => /value|secret/i.test(key))).toBe(false);
+  });
 });

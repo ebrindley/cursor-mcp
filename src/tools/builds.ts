@@ -4,9 +4,8 @@ import { CursorCancelledError, seg, type CursorClient } from "../client.js";
 import { requestScope, withWaitScope } from "../request-context.js";
 import { within, sleep, WaitStoppedError } from "../wait.js";
 import { activeProfile, type Policy } from "../config.js";
-import { EnvironmentListSchema, readEnvironment } from "../environment-api.js";
+import { resolveEnvironmentTarget } from "../environment-api.js";
 import { PolicyError, CursorTransportError } from "../errors.js";
-import { resolveEnvironmentBinding } from "../policy.js";
 import { buildOutcome, isTerminalBuild } from "../environment-operations.js";
 import { defineTool } from "./register.js";
 import { READ } from "./annotations.js";
@@ -29,28 +28,7 @@ type TargetArgs = { environment?: string; environmentPublicId?: string };
 
 export function registerBuildReadTools(server: McpServer, client: CursorClient, policy: Policy): string[] {
   const profile = activeProfile(policy), names: string[] = [];
-  const target = async (args: TargetArgs) => {
-    const binding = args.environment ? resolveEnvironmentBinding(profile, args.environment) : undefined;
-    let id = args.environmentPublicId ?? binding?.publicId;
-    if (!id && !args.environment) throw new PolicyError("pass environmentPublicId or an allowed environment name");
-    if (!id) {
-      // A name can exist in more than one ownership scope. Never choose the first match.
-      const matches = new Set<string>(); let cursor: string | undefined;
-      for (let page = 0; page < 10; page++) {
-        const listed = await client.get("/v1/environments", EnvironmentListSchema, { query: { limit: 100, cursor } });
-        for (const e of listed.items) if (e.name === args.environment && (!binding?.scope || binding.scope === e.owner)) matches.add(e.id);
-        cursor = listed.nextCursor;
-        if (!cursor) break;
-      }
-      if (cursor || matches.size !== 1) throw new PolicyError("environment name is unresolved or ambiguous; pass environmentPublicId");
-      id = [...matches][0]!;
-    }
-    if (binding?.publicId && id !== binding.publicId) throw new PolicyError("environmentPublicId does not match the profile binding");
-    const environment = await readEnvironment(client, profile, id);
-    if (args.environment && environment.name !== undefined && environment.name !== args.environment)
-      throw new PolicyError("environment response name does not match the requested environment");
-    return environment;
-  };
+  const target = (args: TargetArgs) => resolveEnvironmentTarget(client, profile, args);
   const view = (build: z.infer<typeof BuildSchema>, id: string) => {
     if (build.environmentId !== id) throw new PolicyError("Build belongs to a different environment");
     const createdAtMs = Date.parse(build.createdAt);

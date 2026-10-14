@@ -5,7 +5,8 @@
  * Callers see Cursor domain operations, not REST, SDK, or dashboard routes.
  * Tool names stay stable if an internal integration changes. Only controls with
  * a published, testable API-key contract are `supported`; everything else is an
- * explicit capability result. Secret *values* are never a read or write surface.
+ * explicit capability result. Secret *names and metadata* are a supported read;
+ * secret *values* are never a read or write surface.
  *
  * Evidence and authority follow `docs/cursor-capabilities.md`. Slack,
  * notifications, Cursor Origin, self-hosted fleets, billing, and unrelated
@@ -16,6 +17,7 @@ import type {
   CapabilityAuthority,
   CapabilityEvidence,
 } from "./lifecycle-model.js";
+import type { SecretInventory, SecretInventoryScope } from "./secret-inventory.js";
 import type { Me } from "./schemas.js";
 
 /** Stable MCP names. An internal route change must not rename these. */
@@ -102,6 +104,10 @@ export interface WorkspaceControlResult extends WorkspaceControlCapability {
   entitlement?: AccountEntitlement;
   models?: string[];
   repos?: string[];
+  /** Secret names and metadata for the `secrets` read. Never values. */
+  inventory?: SecretInventory;
+  /** The documented Cursor error code a capability result was derived from. */
+  apiErrorCode?: string;
 }
 
 export class WorkspaceCapabilityError extends Error {
@@ -235,6 +241,32 @@ function supportedRead(
   });
 }
 
+/**
+ * Secret names and metadata through the published list endpoints. The values are
+ * not in any response, and this server has no path that would request one.
+ */
+function secretsRead(): WorkspaceControlCapability {
+  return capability({
+    id: "secrets",
+    kind: "read",
+    status: "supported",
+    authority: "api-key",
+    evidence: "documented",
+    tool: WORKSPACE_GET_TOOL,
+    reason:
+      "Secret names and metadata are a published API-key read: GET /v1/environments/{id}/secrets, " +
+      "GET /v1/team/secrets, and GET /v1/secrets. Names, types, owners, repositories, and creation " +
+      "times are returned; secret values never are.",
+    requiredReadback:
+      "items[] with name, type, repos, createdAt, and owner from the list endpoints; no value field",
+    nextSteps: [
+      `Call ${WORKSPACE_GET_TOOL} with control=secrets and scope=environment (with environment or environmentPublicId) or scope=team.`,
+      "scope=account lists every secret the key can see, including other members' personal secret metadata for a team admin key; it also needs allowAccountWide=true and a profile with environmentAccess=account.",
+      "Pass cursor from a returned nextCursor to continue a list that stopped early.",
+    ],
+  });
+}
+
 function unverifiedRead(
   id: WorkspaceControlId,
   authority: CapabilityAuthority,
@@ -260,13 +292,14 @@ function unsupportedWrite(
   id: WritableWorkspaceControl,
   authority: CapabilityAuthority,
   reason: string,
+  evidence: CapabilityEvidence = "uncertain",
 ): WorkspaceControlCapability {
   return capability({
     id,
     kind: "write",
     status: "unsupported",
     authority,
-    evidence: "uncertain",
+    evidence,
     // No tool performs the write. The catalog row is where the capability
     // stays addressable; a verb that could only ever answer "unsupported" was
     // removed rather than kept as a decoy.
@@ -377,15 +410,12 @@ export const WORKSPACE_CONTROLS: readonly WorkspaceControlSurface[] = [
   },
   {
     id: "secrets",
-    read: unverifiedRead(
-      "secrets",
-      "browser-session",
-      "Secret names and classes are dashboard-documented. Secret values are never an MCP read surface.",
-    ),
+    read: secretsRead(),
     write: unsupportedWrite(
       "secrets",
-      "browser-session",
-      "No published API-key or SDK operation creates or deletes Cloud Agent secrets, and this tool never accepts a secret value.",
+      "api-key",
+      "The API publishes secret writes (PUT and DELETE on /v1/environments/{id}/secrets/{name} and /v1/team/secrets/{name}), but this server never performs them and never accepts a secret value.",
+      "documented",
     ),
   },
   {
@@ -449,6 +479,9 @@ export function capabilityResult(
     entitlement?: AccountEntitlement;
     models?: string[];
     repos?: string[];
+    inventory?: SecretInventory;
+    apiErrorCode?: string;
+    nextSteps?: string[];
   } = {},
 ): WorkspaceControlResult {
   const status = extra.status ?? capability.status;
@@ -462,6 +495,9 @@ export function capabilityResult(
   if (extra.entitlement !== undefined) result.entitlement = extra.entitlement;
   if (extra.models !== undefined) result.models = extra.models;
   if (extra.repos !== undefined) result.repos = extra.repos;
+  if (extra.inventory !== undefined) result.inventory = extra.inventory;
+  if (extra.apiErrorCode !== undefined) result.apiErrorCode = extra.apiErrorCode;
+  if (extra.nextSteps !== undefined) result.nextSteps = extra.nextSteps;
   return result;
 }
 
@@ -492,6 +528,121 @@ export function planGatedResult(
   });
 }
 
+/**
+ * Explicit capability results for the documented secret-list refusals.
+ *
+ * A key, plan, role, or environment the key cannot reach is `unavailable-on-plan`,
+ * the same status a plan-gated read already uses. A `grok_` key has no path at
+ * all, so it is `unsupported`. Reasons are fixed text of ours; the upstream
+ * message is not echoed. An undocumented code returns undefined and the caller
+ * rethrows.
+ */
+export function secretInventoryRefusal(
+  capability: WorkspaceControlCapability,
+  scope: SecretInventoryScope,
+  code: string | undefined,
+): WorkspaceControlResult | undefined {
+  if (code === undefined) return undefined;
+  const refuse = (
+    status: WorkspaceControlStatus,
+    reason: string,
+    nextSteps: string[],
+  ): WorkspaceControlResult =>
+    capabilityResult(capability, { status, reason, apiErrorCode: code, nextSteps });
+  switch (code) {
+    case "feature_unavailable":
+    case "plan_required":
+    case "role_forbidden":
+      return {
+        ...planGatedResult(capability, code),
+        apiErrorCode: code,
+        nextSteps: [
+          "Check the plan and role on the Cloud Agents dashboard; the environments API must be enabled for the account.",
+        ],
+      };
+    case "key_not_supported":
+      return refuse(
+        "unsupported",
+        "This API key type (a grok_ key) cannot list Cloud Agent secrets (key_not_supported).",
+        ["Use a Cursor user or service-account API key."],
+      );
+    case "repository_access":
+      return refuse(
+        "unavailable-on-plan",
+        "This API key is limited to certain repositories, so it cannot list team or personal secrets, which reach every repository (repository_access).",
+        [
+          "Use a key without a repository limit, or read an environment whose repositories all sit inside the key's limit with scope=environment.",
+        ],
+      );
+    case "team_membership_required":
+      return refuse(
+        "unavailable-on-plan",
+        "This API key is not working in a team, or its user is not a team member (team_membership_required).",
+        ["Use a key that belongs to a team member or to a team service account."],
+      );
+    case "team_admin_required":
+      return refuse(
+        "unavailable-on-plan",
+        "This team lets only admins read secrets (team_admin_required).",
+        ["Ask a team admin to run this read, or change the team's secrets setting on the dashboard."],
+      );
+    case "user_required":
+      return refuse(
+        "unavailable-on-plan",
+        scope === "account"
+          ? "Personal secrets need an API key that acts for a user; this key does not (user_required)."
+          : "This API key does not act for a user (user_required).",
+        ["Use a user API key, or read scope=team or scope=environment instead."],
+      );
+    case "environment_not_found":
+      return refuse(
+        "unavailable-on-plan",
+        "The environment does not exist, or this API key cannot list its secrets, including an environment outside the key's repository limit (environment_not_found).",
+        ["Check the environment id with cursor_list_environments, and use a key whose repository limit covers it."],
+      );
+    default:
+      return undefined;
+  }
+}
+
+const STOP_TEXT: Record<NonNullable<SecretInventory["stoppedBecause"]>, string> = {
+  page_cap: "the page limit for one call was reached",
+  time_budget: "the wait budget for one call was reached",
+  size_budget: "the next page would not fit the response size budget",
+  cursor_repeat: "Cursor returned a cursor it had already returned",
+  interrupted: "a later page could not be read",
+};
+
+/** One line per version: name first, so a long list scans as a list of names. */
+export function secretInventoryLines(inventory: SecretInventory): string[] {
+  return inventory.items.map((entry) => {
+    const owner =
+      entry.owner.kind === "environment"
+        ? `environment ${entry.owner.environmentPublicId ?? "(unknown)"}`
+        : entry.owner.kind === "user"
+          ? `user ${entry.owner.userEmail ?? "(no email)"}`
+          : entry.owner.kind;
+    const repos = entry.repos.length === 0 ? "all repos" : entry.repos.join(",");
+    return `${entry.name}  ${entry.type}  ${owner}  ${repos}`;
+  });
+}
+
+export function secretInventorySummary(inventory: SecretInventory): string {
+  const counts = `${inventory.returned} secret versions from ${inventory.pages} page(s), scope=${inventory.scope}`;
+  const from = inventory.resumed ? "; started at a supplied cursor, so earlier pages are not included" : "";
+  if (inventory.complete) return `${counts}; the list is complete${from}.`;
+  const why = inventory.stoppedBecause === undefined ? "" : ` because ${STOP_TEXT[inventory.stoppedBecause]}`;
+  const missing =
+    inventory.omitted === undefined
+      ? ""
+      : ` ${inventory.omitted} versions on the first page did not fit the response size and cannot be fetched separately; use scope=environment for a smaller list or raise maxResponseBytes.`;
+  const next =
+    inventory.nextCursor === undefined
+      ? ""
+      : ` Continue with cursor=${inventory.nextCursor} and the same scope arguments.`;
+  return `${counts}${from}; the list is not complete: reading stopped${why}.${missing}${next}`;
+}
+
 export function inspectWorkspaceText(entitlement: AccountEntitlement): string {
   const key = entitlement.apiKeyName ?? "(unnamed)";
   const email = entitlement.userEmail ?? "(none)";
@@ -508,6 +659,9 @@ export function controlResultText(result: WorkspaceControlResult): string {
   }
   if (result.repos !== undefined) {
     parts.push(result.repos.join("\n") || "(no repositories connected)");
+  }
+  if (result.inventory !== undefined) {
+    parts.push(secretInventoryLines(result.inventory).join("\n") || "(no secrets returned)");
   }
   parts.push(result.reason);
   return parts.join("\n");

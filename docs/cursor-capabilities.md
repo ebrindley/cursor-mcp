@@ -294,7 +294,7 @@ stable if an internal integration changes. Only the three API-key reads below ar
 | Connected repositories | `api-key` | `GET /v1/repositories`, `documented`, `observed` |
 | Default model/repository/base branch | `browser-session` | Dashboard-documented; programmatic contract `uncertain` |
 | Network mode and allowlist | `browser-session`, `admin` | Dashboard-documented; programmatic contract `uncertain` |
-| Secret names and classes | `browser-session`, `admin` | Dashboard-documented. Secret values are never an MCP read surface. |
+| Secret names and metadata | `api-key` | `GET /v1/environments/{id}/secrets`, `GET /v1/team/secrets`, `GET /v1/secrets`, `documented`. Names, types, owners, repositories, and creation times only; the API publishes secret writes, but this server never performs them and never accepts or returns a value. |
 | MCP policy | `browser-session`, `admin` | Dashboard-documented; programmatic contract `uncertain` |
 | Team follow-up policy | `admin` | Separate team/admin surface |
 | Slack integration and notifications | `browser-session`, `admin` | Out of the initial lifecycle implementation scope |

@@ -216,7 +216,7 @@ which this server does not do.
 | `cursor_list_repos` | `GET /v1/repositories` | |
 | `cursor_list_workspace_controls` | catalog | |
 | `cursor_inspect_workspace` | `GET /v1/me` plus catalog | |
-| `cursor_get_workspace_control` | live API-key read, or a capability result | |
+| `cursor_get_workspace_control` | live API-key read, or a capability result; for `secrets`, `GET /v1/environments/{id}/secrets`, `GET /v1/team/secrets`, or `GET /v1/secrets` by `scope` | |
 | `cursor_list_agents` | `GET /v1/agents`, optionally filtered by `prUrl`, plus one `GET /v1/agents/{id}` per listed summary too thin to check against the policy | |
 | `cursor_get_agent` | `GET /v1/agents/{id}` | |
 | `cursor_list_runs` | `GET /v1/agents/{id}/runs` | |
@@ -258,14 +258,51 @@ which this server does not do.
 | `cursor_assess_environment_health` | readback you already hold | no, it launches nothing |
 | `cursor_refresh_environment_toolchain` | delegated run in the named environment | yes, one draft Build, and only on established toolchain drift |
 
-**Workspace Controls are one catalog, not a dashboard mirror.** Identity, models, and
-connected repositories have published API-key reads. Default model/repository, base branch,
-PR defaults, network policy, secret *names*, MCP policy, and team follow-up stay
-addressable: reads return `unverified` until a non-browser contract exists, writes return
-`unsupported` after the existing tool allowlist and `confirm: true`, and a live
-`plan_required` / `feature_unavailable` / `role_forbidden` is `unavailable-on-plan`. Secret
-values are never accepted, returned, or logged. Slack, Origin, billing, and self-hosted
-fleets are not in the catalog.
+**Workspace Controls are one catalog, not a dashboard mirror.** Identity, models,
+connected repositories, and secret *names and metadata* have published API-key reads.
+Default model/repository, base branch, PR defaults, network policy, MCP policy, and team
+follow-up stay addressable: reads return `unverified` until a non-browser contract exists,
+writes return `unsupported` after the existing tool allowlist and `confirm: true`, and a live
+`plan_required` / `feature_unavailable` / `role_forbidden` is `unavailable-on-plan`. Slack,
+Origin, billing, and self-hosted fleets are not in the catalog.
+
+**Secret inventory.** `cursor_get_workspace_control({control: "secrets", scope})` lists
+secret versions: `name`, `type`, `versionId`, `repos` (empty means every repository),
+`createdAt`, and `owner` (`team`, `user` with `userEmail`, or `environment` with
+`environmentPublicId`). Values are never requested, projected, or returned, and the result
+also passes through `redactSecretFields`; the list sits under `inventory.items` because the
+redaction drops keys named `secrets`, `env`, or `value`. The API publishes secret writes
+(`PUT`/`DELETE` on `/v1/environments/{id}/secrets/{name}` and `/v1/team/secrets/{name}`);
+this server never performs them and never accepts a value, so the write row stays
+`unsupported`.
+
+- There is no default scope. Without `scope` the call makes no request and says what to pass.
+- `scope: "environment"` with `environment` (a name the active profile allows) or
+  `environmentPublicId` reads the environment through the same profile and repository checks
+  as other environment reads, then `GET /v1/environments/{id}/secrets`. Read-only mode (no
+  policy file) refuses it, as it does other environment reads.
+- `scope: "team"` reads `GET /v1/team/secrets`.
+- `scope: "account"` reads `GET /v1/secrets` and needs `allowAccountWide: true` and a profile
+  with `environmentAccess: "account"`, because a team admin's own user key also receives other
+  members' personal secret metadata, with their emails, and environments outside a named
+  profile.
+- Pagination follows `nextCursor` until an explicit `null`, including empty pages, for at most
+  20 pages of 50, while at least 5 s of the 45 s wait budget remain. A missing or empty
+  `nextCursor` is a contract error, never a complete list. The names must also fit
+  `maxResponseBytes` beside the rest of the result, which is measured, not estimated: a page that would not fit, the last one
+  included, is left out whole and the returned `nextCursor` fetches it again. A stopped read
+  reports `inventory.complete: false`, `stoppedBecause` (`page_cap`, `time_budget`,
+  `size_budget`, `cursor_repeat`, or `interrupted`), and `nextCursor`; pass it back as `cursor`
+  with the same scope arguments to continue. If the first page alone is over budget (a long
+  team or environment list, which is not paginated), a prefix is returned with
+  `inventory.omitted` counting the versions that did not fit. A page-1 failure is an error,
+  not a partial list. If `maxResponseBytes` cannot hold even an empty inventory, the result is a
+  short statement to that effect with no inventory.
+- Documented refusals are capability results, not errors, and carry `apiErrorCode`:
+  `feature_unavailable` (also `plan_required`, `role_forbidden`), `repository_access`,
+  `team_membership_required`, `team_admin_required`, `user_required`, and 404
+  `environment_not_found` are `unavailable-on-plan`; `key_not_supported` (a `grok_` key) is
+  `unsupported`. Any other error code is thrown as usual.
 
 **The three environment-definition tools never call Cursor.** They parse JSONC (comments
 allowed, trailing commas not), validate the environment contract reviewed on

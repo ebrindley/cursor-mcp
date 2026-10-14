@@ -3,7 +3,7 @@ import type { CursorClient } from "./client.js";
 import { seg } from "./client.js";
 import type { Profile } from "./config.js";
 import { PolicyError } from "./errors.js";
-import { assertEnvironmentIdentity, assertEnvironmentReposAllowed, assertAgentReposAllowed } from "./policy.js";
+import { assertEnvironmentIdentity, assertEnvironmentReposAllowed, assertAgentReposAllowed, resolveEnvironmentBinding } from "./policy.js";
 import { normalizeEnvironmentConfiguration } from "./cursor-cli-environments.js";
 
 export const EnvironmentSchema = z.object({
@@ -49,6 +49,37 @@ export async function readEnvironment(client: CursorClient, profile: Profile | u
   const environment = await client.get(`/v1/environments/${seg(id)}`, EnvironmentSchema);
   if (environment.id !== id) throw new PolicyError("environment response identifies a different environment");
   assertEnvironmentRead(profile, environment);
+  return environment;
+}
+
+/**
+ * Resolve an allowed environment name or a public id to a profile-checked
+ * environment. A name can exist in more than one ownership scope, so it is never
+ * resolved by taking the first match.
+ */
+export async function resolveEnvironmentTarget(
+  client: CursorClient,
+  profile: Profile | undefined,
+  args: { environment?: string | undefined; environmentPublicId?: string | undefined },
+): Promise<Environment> {
+  const binding = args.environment ? resolveEnvironmentBinding(profile, args.environment) : undefined;
+  let id = args.environmentPublicId ?? binding?.publicId;
+  if (!id && !args.environment) throw new PolicyError("pass environmentPublicId or an allowed environment name");
+  if (!id) {
+    const matches = new Set<string>(); let cursor: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const listed = await client.get("/v1/environments", EnvironmentListSchema, { query: { limit: 100, cursor } });
+      for (const e of listed.items) if (e.name === args.environment && (!binding?.scope || binding.scope === e.owner)) matches.add(e.id);
+      cursor = listed.nextCursor;
+      if (!cursor) break;
+    }
+    if (cursor || matches.size !== 1) throw new PolicyError("environment name is unresolved or ambiguous; pass environmentPublicId");
+    id = [...matches][0]!;
+  }
+  if (binding?.publicId && id !== binding.publicId) throw new PolicyError("environmentPublicId does not match the profile binding");
+  const environment = await readEnvironment(client, profile, id);
+  if (args.environment && environment.name !== undefined && environment.name !== args.environment)
+    throw new PolicyError("environment response name does not match the requested environment");
   return environment;
 }
 
