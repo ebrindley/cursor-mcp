@@ -157,6 +157,18 @@ agent. Legacy empty `allowedEnvVars` and `allowedMcpServers` arrays are accepted
 so an older policy file still starts; remove those keys when next editing the file. Non-empty
 values are rejected because no corresponding control exists.
 
+`cursor_create_agent` and `cursor_create_run` accept up to 5 `images`, sent as
+`prompt.images`. Each entry is `{url}` (https only, no credentials in the URL; Cursor fetches
+it) or `{data, mimeType}` (standard base64 with no `data:` prefix; `image/png`, `image/jpeg`,
+`image/gif`, or `image/webp`), plus an optional `dimension: {width, height}`. Inline images
+total at most 5 MiB decoded per call (base64 adds a third), and the whole tool call, prompt
+included, must stay under the MCP stdio transport's 10 MiB message limit; the API's 15 MB
+per-image limit is also checked. Larger images go by `url`. A violation is refused before
+any request. Image bytes and URLs are never echoed in text, structured output, errors, or
+logs, and any that an upstream error quotes are replaced with `[image]`; results report only `imageCount`, and only when images
+were sent. Omitting `images` leaves the request body unchanged. Delegated
+runs and environment-lifecycle launches do not take images.
+
 Launches accept one `repo`, up to 20 `repos`, or one named `environment`; those target
 forms are mutually exclusive. With all target/source options absent, a launch-enabled
 profile permits a no-repository VM unless `allowNoRepository: false` denies it. Named environments must

@@ -46,6 +46,7 @@ import {
   PolicyError,
 } from "../errors.js";
 import { followUpAcceptance, type FollowUpAcceptance } from "../lifecycle-model.js";
+import { PromptImagesInput, promptImages, type PromptImageInput } from "../prompt-images.js";
 import {
   cancelRejectedRun,
   rejectedRunCleanupMessage,
@@ -1078,6 +1079,7 @@ export function registerAgentTools(
           ),
         noRepository: z.boolean().optional().describe("No-repository launch; inferred when all target/source options are absent. Allowed by default for launch-enabled profiles; allowNoRepository:false opts out. False requires a target. Does not prove a clean filesystem; true conflicts with target/source options."),
         prompt: z.string().min(1).describe("The task for the agent."),
+        images: PromptImagesInput,
         model: ModelInputSchema.optional().describe("Model id or selection with params from cursor_get_workspace_control models detail. Omit for the profile/account default."),
         startingRef: z
           .string()
@@ -1142,6 +1144,7 @@ export function registerAgentTools(
           .describe("Whether the returned agent echoed the requested value; omitted when Cursor did not echo it."),
         customSubagentsRequested: z.array(z.string()).optional().describe("Names of the requested custom subagents."),
         customSubagentsVerified: z.boolean().optional().describe("Returned subagent names match the requested set; omitted when Cursor did not echo them."),
+        imageCount: z.number().int().optional().describe("Images sent with the prompt; present only when images were."),
       },
       annotations: CREATE,
     },
@@ -1151,6 +1154,7 @@ export function registerAgentTools(
       repos?: Array<{ url: string; startingRef?: string; prUrl?: string }>;
       environment?: string;
       prompt: string;
+      images?: PromptImageInput[];
       model?: ModelInput;
       startingRef?: string;
       prUrl?: string;
@@ -1164,6 +1168,7 @@ export function registerAgentTools(
       customSubagents?: CustomSubagent[];
     }) => {
       const launch = resolveCreateAgentLaunch(profile, args);
+      const images = promptImages(args.images);
       const autoCreatePR = resolveAutoCreatePR(profile, args.autoCreatePR);
       if (args.skipReviewerRequest === true && !autoCreatePR) {
         throw new PolicyError(
@@ -1190,11 +1195,12 @@ export function registerAgentTools(
       // pretend otherwise.
       const agentId = (args.agentId ?? `bc-${randomUUID()}`).toLowerCase();
 
-      const created = await withUsageGuidance(() => withCreateRecovery(agentId, () =>
+      const send = <T>(call: () => Promise<T>) => (images === undefined ? call() : images.shield(call));
+      const created = await withUsageGuidance(() => withCreateRecovery(agentId, () => send(() =>
         client.post("/v1/agents", CreateAgentResponseSchema, {
           body: {
             agentId,
-            prompt: { text: args.prompt },
+            prompt: { text: args.prompt, ...(images === undefined ? {} : { images: images.wire }) },
             autoCreatePR,
             ...(launch.kind === "environment"
               ? { env: { type: "cloud" as const, name: launch.name } }
@@ -1212,7 +1218,7 @@ export function registerAgentTools(
             ...(customSubagents === undefined ? {} : { customSubagents }),
           },
         }),
-      ));
+      )));
 
       createdRuns.add(runKey(created.agent.id, created.run.id));
       const environment = created.agent.env?.name?.trim();
@@ -1299,6 +1305,7 @@ export function registerAgentTools(
           ...(customSubagentsVerified === false
             ? ["customSubagents were requested but the returned names differ from the request"]
             : []),
+          ...(images === undefined ? [] : [`images=${images.count}`]),
         ].join("\n"),
         structured: {
           agentId: created.agent.id,
@@ -1330,6 +1337,7 @@ export function registerAgentTools(
             ? {}
             : { customSubagentsRequested: requestedSubagentNames }),
           ...(customSubagentsVerified === undefined ? {} : { customSubagentsVerified }),
+          ...(images === undefined ? {} : { imageCount: images.count }),
         },
         policy,
       });
@@ -1345,38 +1353,52 @@ export function registerAgentTools(
       inputSchema: {
         agentId: AgentId,
         prompt: z.string().min(1),
+        images: PromptImagesInput,
         model: ModelInputSchema.optional().describe("Explicit selection; a profile pin is applied on every run. SDK-derived REST field; modelRequested is not execution proof."),
         mode: z.enum(["agent", "plan"]).optional(),
       },
-      outputSchema: { runId: z.string(), status: z.string(), modelRequested: ModelInputSchema.optional() },
+      outputSchema: {
+        runId: z.string(),
+        status: z.string(),
+        modelRequested: ModelInputSchema.optional(),
+        imageCount: z.number().int().optional().describe("Images sent with the prompt; present only when images were."),
+      },
       annotations: CREATE,
     },
     handler: async (args: {
       agentId: string;
       prompt: string;
+      images?: PromptImageInput[];
       model?: ModelInput;
       mode?: "agent" | "plan";
     }) => {
       const model = resolveModel(profile, args.model);
+      const images = promptImages(args.images);
       await scope.assert(args.agentId);
-      const created = await withUsageGuidance(() =>
+      const send = <T>(call: () => Promise<T>) => (images === undefined ? call() : images.shield(call));
+      const created = await withUsageGuidance(() => send(() =>
         client.post(
           `/v1/agents/${seg(args.agentId)}/runs`,
           CreateRunResponseSchema,
           {
             body: {
-              prompt: { text: args.prompt },
+              prompt: { text: args.prompt, ...(images === undefined ? {} : { images: images.wire }) },
               ...(model === undefined ? {} : { model: modelSelection(model) }),
               ...(args.mode === undefined ? {} : { mode: args.mode }),
             },
           },
         ),
-      );
+      ));
       createdRuns.add(runKey(args.agentId, created.run.id));
       return ok({
         source: `POST /v1/agents/${args.agentId}/runs`,
-        text: `run=${created.run.id} status=${created.run.status}`,
-        structured: { runId: created.run.id, status: created.run.status, ...(model === undefined ? {} : { modelRequested: model }) },
+        text: `run=${created.run.id} status=${created.run.status}${images === undefined ? "" : ` images=${images.count}`}`,
+        structured: {
+          runId: created.run.id,
+          status: created.run.status,
+          ...(model === undefined ? {} : { modelRequested: model }),
+          ...(images === undefined ? {} : { imageCount: images.count }),
+        },
         policy,
       });
     },

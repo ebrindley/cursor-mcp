@@ -3394,3 +3394,213 @@ describe("parameterized supervisor selections", () => {
       runs: [{id: "run-1", totalTokens: 30, usage, rawCostCents: 0.02, chargedCents: 0}]});
   });
 });
+
+describe("prompt images", () => {
+  const PNG = Buffer.from("not-really-a-png-but-private-bytes").toString("base64");
+  const repo = { repo: "ExampleOrg/ExampleRepo", prompt: "look at this" };
+  const dimension = { width: 640, height: 480 };
+  const bodyOf = (call: number) =>
+    JSON.parse(String(fetchImpl.mock.calls[call]![1]!.body));
+  // Canonical base64 of about `bytes` decoded bytes (exact when `bytes` is a multiple of 3).
+  const b64Of = (bytes: number) => "A".repeat(Math.floor(bytes / 3) * 4);
+
+  it("maps url and inline images to prompt.images on create and follow-up", async () => {
+    fetchImpl.mockImplementation(async () => json(createdPayload()));
+    const client = await connect(fetchImpl, policy(["*"]));
+    const images = [
+      { url: "https://example.com/shot.png", dimension },
+      { data: PNG, mimeType: "image/png" },
+    ];
+    const created = await client.callTool({
+      name: "cursor_create_agent",
+      arguments: { ...repo, images },
+    });
+    expect(created.isError, text(created)).toBeFalsy();
+    expect(created.structuredContent).toMatchObject({ imageCount: 2 });
+    expect(bodyOf(0).prompt).toEqual({ text: "look at this", images });
+
+    const followup = await client.callTool({
+      name: "cursor_create_run",
+      arguments: { agentId: "bc-1", prompt: "again", images },
+    });
+    expect(followup.isError, text(followup)).toBeFalsy();
+    expect(followup.structuredContent).toMatchObject({ runId: "run-1", imageCount: 2 });
+    expect(bodyOf(1).prompt).toEqual({ text: "again", images });
+  });
+
+  it("leaves the request body and output untouched when images are omitted or empty", async () => {
+    fetchImpl.mockImplementation(async () => json(createdPayload()));
+    const client = await connect(fetchImpl, policy(["*"]));
+    for (const extra of [{}, { images: [] }]) {
+      const created = await client.callTool({
+        name: "cursor_create_agent",
+        arguments: { ...repo, ...extra },
+      });
+      const followup = await client.callTool({
+        name: "cursor_create_run",
+        arguments: { agentId: "bc-1", prompt: "again", ...extra },
+      });
+      expect(created.structuredContent).not.toHaveProperty("imageCount");
+      expect(followup.structuredContent).not.toHaveProperty("imageCount");
+    }
+    for (const call of [0, 1, 2, 3]) {
+      expect(bodyOf(call).prompt).not.toHaveProperty("images");
+    }
+  });
+
+  it.each([
+    ["http scheme", { url: "http://example.com/a.png" }],
+    ["file scheme", { url: "file:///etc/hosts" }],
+    ["data scheme", { url: "data:image/png;base64,AAAA" }],
+    ["not a URL", { url: "example.com/a.png" }],
+    ["credentials", { url: "https://user:secret@example.com/a.png" }],
+    ["a data: prefix", { data: "data:image/png;base64,AAAA", mimeType: "image/png" }],
+    ["whitespace", { data: "AAAA AAAA", mimeType: "image/png" }],
+    ["url-safe base64", { data: "AA-_", mimeType: "image/png" }],
+    ["bad padding", { data: "AAA", mimeType: "image/png" }],
+    ["unsupported mimeType", { data: "AAAA", mimeType: "image/svg+xml" }],
+    ["no source", { dimension }],
+    ["url with mimeType", { url: "https://example.com/a.png", mimeType: "image/png" }],
+    ["url with data", { url: "https://example.com/a.png", data: "AAAA" }],
+  ])("refuses an image with %s before reaching Cursor", async (_label, image) => {
+    const client = await connect(fetchImpl, policy(["*"]));
+    for (const call of [
+      { name: "cursor_create_agent", arguments: { ...repo, images: [image] } },
+      { name: "cursor_create_run", arguments: { agentId: "bc-1", prompt: "x", images: [image] } },
+    ]) {
+      const result = await client.callTool(call);
+      expect(result.isError).toBe(true);
+      expect(text(result)).not.toContain("secret");
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("accepts a long signed https url", async () => {
+    fetchImpl.mockImplementation(async () => json(createdPayload()));
+    const client = await connect(fetchImpl, policy(["*"]));
+    const url = `https://example.com/a.png?sig=${"x".repeat(4_000)}`;
+    const result = await client.callTool({ name: "cursor_create_agent", arguments: { ...repo, images: [{ url }] } });
+    expect(result.isError, text(result)).toBeFalsy();
+    expect(bodyOf(0).prompt.images).toEqual([{ url }]);
+  });
+
+  it.each([
+    ["cursor_create_agent", repo],
+    ["cursor_create_run", { agentId: "bc-1", prompt: "x" }],
+  ])("scrubs submitted images from an upstream error on %s", async (name, args) => {
+    const url = "https://example.com/signed/shot.png?token=sekrit-token";
+    // The upstream quotes the data whole and the url truncated by the client's summary cap.
+    fetchImpl.mockImplementation(async () =>
+      json({ error: { code: "invalid_request", message: `bad image ${url} and ${PNG} and ${PNG.slice(0, 30)}` } }, 400));
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const previous = process.env.CURSOR_MCP_LOG_LEVEL;
+    process.env.CURSOR_MCP_LOG_LEVEL = "debug";
+    try {
+      const client = await connect(fetchImpl, policy(["*"]));
+      const result = await client.callTool({
+        name,
+        arguments: { ...args, images: [{ url }, { data: PNG, mimeType: "image/png" }] },
+      });
+      expect(result.isError).toBe(true);
+      const seen = JSON.stringify(result) + stderr.mock.calls.map((c) => String(c[0])).join("");
+      expect(seen).toContain("[image]");
+      expect(seen).not.toContain("sekrit-token");
+      expect(seen).not.toContain("example.com/signed");
+      expect(seen).not.toContain(PNG.slice(0, 30));
+    } finally {
+      stderr.mockRestore();
+      if (previous === undefined) delete process.env.CURSOR_MCP_LOG_LEVEL;
+      else process.env.CURSOR_MCP_LOG_LEVEL = previous;
+    }
+  });
+
+  it.each([
+    ["cursor_create_agent", repo],
+    ["cursor_create_run", { agentId: "bc-1", prompt: "x" }],
+  ])("scrubs a truncated quote of a url containing parentheses on %s", async (name, args) => {
+    const url = "https://example.com/image(1).png?token=sekrit-token&padding=abcdef";
+    const quoted = url.replace("example.com", "EXAMPLE.com").slice(0, -4);
+    fetchImpl.mockImplementation(async () =>
+      json({ error: { code: "invalid_request", message: `bad image ${quoted}` } }, 400));
+    const client = await connect(fetchImpl, policy(["*"]));
+    const result = await client.callTool({ name, arguments: { ...args, images: [{ url }] } });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("[image]");
+    expect(text(result)).not.toContain("sekrit-token");
+  });
+
+  it("refuses more than five images", async () => {
+    const client = await connect(fetchImpl, policy(["*"]));
+    const result = await client.callTool({
+      name: "cursor_create_agent",
+      arguments: { ...repo, images: Array.from({ length: 6 }, () => ({ url: "https://example.com/a.png" })) },
+    });
+    expect(result.isError).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("enforces the 5 MiB inline total and the 15 MB per-image limit without echoing data", async () => {
+    fetchImpl.mockImplementation(async () => json(createdPayload()));
+    const client = await connect(fetchImpl, policy(["*"]));
+    const MiB = 1024 * 1024;
+    const three = b64Of(3 * MiB);
+    const two = b64Of(2 * MiB);
+    const atLimit = await client.callTool({
+      name: "cursor_create_run",
+      arguments: {
+        agentId: "bc-1",
+        prompt: "x",
+        images: [{ data: three, mimeType: "image/png" }, { data: two, mimeType: "image/png" }],
+      },
+    });
+    // Exactly 5 MiB is allowed; the next case is one entry over.
+    expect(atLimit.isError, text(atLimit)).toBeFalsy();
+    fetchImpl.mockClear();
+
+    const total = await client.callTool({
+      name: "cursor_create_agent",
+      arguments: { ...repo, images: [{ data: three, mimeType: "image/png" }, { data: b64Of(2 * MiB + 3), mimeType: "image/jpeg" }] },
+    });
+    expect(total.isError).toBe(true);
+    expect(text(total)).toContain("5 MiB");
+
+    const single = await client.callTool({
+      name: "cursor_create_run",
+      arguments: { agentId: "bc-1", prompt: "x", images: [{ data: b64Of(16 * MiB), mimeType: "image/png" }] },
+    });
+    expect(single.isError).toBe(true);
+    expect(text(single)).toContain("15 MB");
+    expect(text(single)).not.toContain("AAAAAAAA");
+    expect(text(total)).not.toContain("AAAAAAAA");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("never reports image data or urls in results or logs", async () => {
+    fetchImpl.mockImplementation(async () => json(createdPayload()));
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const previous = process.env.CURSOR_MCP_LOG_LEVEL;
+    process.env.CURSOR_MCP_LOG_LEVEL = "debug";
+    try {
+      const client = await connect(fetchImpl, policy(["*"]));
+      const url = "https://example.com/signed?token=sekrit-token";
+      const images = [{ url }, { data: PNG, mimeType: "image/png" }];
+      const results = [
+        await client.callTool({ name: "cursor_create_agent", arguments: { ...repo, images } }),
+        await client.callTool({ name: "cursor_create_run", arguments: { agentId: "bc-1", prompt: "x", images } }),
+        await client.callTool({
+          name: "cursor_create_run",
+          arguments: { agentId: "bc-1", prompt: "x", images: [{ url: "http://example.com/signed?token=sekrit-token" }] },
+        }),
+      ];
+      const seen = JSON.stringify(results) + stderr.mock.calls.map((c) => String(c[0])).join("");
+      expect(seen).not.toContain(PNG);
+      expect(seen).not.toContain("sekrit-token");
+      expect(results[0]!.structuredContent).toMatchObject({ imageCount: 2 });
+      expect(results[2]!.isError).toBe(true);
+    } finally {
+      stderr.mockRestore();
+      if (previous === undefined) delete process.env.CURSOR_MCP_LOG_LEVEL;
+      else process.env.CURSOR_MCP_LOG_LEVEL = previous;
+    }
+  });
+});
