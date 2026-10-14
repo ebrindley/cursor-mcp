@@ -39,6 +39,14 @@ args = ["/absolute/path/to/cursor-mcp/current/dist/bin.js"]
 `env_vars` passes the named variables from the environment running Codex; it does
 not set their values. See the [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
+Codex limits each MCP tool call with a per-server `tool_timeout_sec`. In Codex
+0.162.1 the source default is 300 s (`DEFAULT_TOOL_TIMEOUT` in
+`codex-rs/codex-mcp/src/rmcp_client.rs`, tag `rust-v0.162.1`), while the Codex
+docs still say 60 s; checked 2026-10-14. Most cursor-mcp tools finish within 45 s.
+Delegation, terminal wake, and configured CLI operations can run longer, so when
+you enable them set an explicit value under `[mcp_servers.cursor]`, for example
+`tool_timeout_sec = 300`. The installer does not write this setting.
+
 ## Grok
 
 ```bash

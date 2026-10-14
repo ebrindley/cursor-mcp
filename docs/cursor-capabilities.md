@@ -1,7 +1,8 @@
 # Cursor capability reference
 
 Baseline checked on 2026-08-28; environment and Build REST coverage updated on
-2026-10-08. This document is organized by Cursor capability,
+2026-10-08; OpenAPI 1.0.0 paths and fields, SDK pin, Cloud MCP docs, CLI changelog,
+and rate limits rechecked on 2026-10-14. This document is organized by Cursor capability,
 not by transport. It records what implementers can rely on now and which lifecycle
 questions still require bounded discovery. The caller-facing architecture that
 consumes these labels is [lifecycle-architecture.md](./lifecycle-architecture.md).
@@ -55,6 +56,8 @@ readback.
 | CLI commands | <https://cursor.com/docs/cli/reference/parameters> |
 | TypeScript SDK | <https://cursor.com/docs/sdk/typescript> |
 | SDK package | <https://www.npmjs.com/package/@cursor/sdk> |
+| Cloud Agents release notes | <https://cursor.com/docs/release-notes/cloud-agents> |
+| API rate limits | <https://cursor.com/docs/api#rate-limits> |
 
 Implementation notes are in [streaming.md](streaming.md). Labels describe
 documented or previously observed behavior, not a fresh live-service guarantee.
@@ -102,7 +105,21 @@ Authority for this section is `api-key` unless stated otherwise.
 | Usage | `documented`, `observed` | Token usage is published. Live REST responses also returned optional cost. |
 | Artifacts | `documented`, `observed` | Agent-scoped files written under the VM artifact directory. The REST API returns a short-lived download URL. |
 | Run stream | `documented`, `observed` | Full-history replay plus tail. REST remains the terminal-state authority; see `streaming.md`. |
+| Webhooks on v1 | `documented` | Still "coming soon" on 2026-10-14; no webhook contract to implement. |
+| Steering a running cloud run | `unavailable` | No cloud steering endpoint on 2026-10-14. SDK `run.steer()` steers only local foreground runs. |
+| Non-GitHub repository hosts | `contradicted` | The endpoint page documents GitHub (Cloud and Enterprise Server), GitLab (Cloud and self-hosted), Bitbucket Cloud, and Azure DevOps; OpenAPI `RepoConfig.url` describes GitHub. Separately, this MCP's repository policy accepts only `github.com`, so a local rejection says nothing about upstream support. |
 | Replay retention | `uncertain` | Capture replay early with `cursor_export_run`. A retention duration without an established epoch is not an expiration deadline; upstream retention is not guaranteed by this server. |
+
+**Create and follow-up fields (OpenAPI 1.0.0, rechecked 2026-10-14).** The
+`CreateAgentRequest` fields below are `documented`. The last column is this MCP's support.
+
+| Field | Documented limits | MCP status |
+|---|---|---|
+| `prompt.images` | At most 5, 15 MB each | Implemented |
+| `skipReviewerRequest` | Only with `autoCreatePR` | Implemented |
+| `customSubagents` | At most 20; create-only | Implemented |
+| `mcpServers` | At most 50; a follow-up replaces the create-time set | Deferred: definitions can carry credentials into host transcripts, and command allowlists cannot constrain arbitrary `npx` arguments. Needs a policy design. |
+| `envVars` | At most 50; beta; silently ignored when not enabled; cannot combine with a client `agentId` | Deferred: conflicts with the always-sent client `agentId` used for create recovery. |
 
 **Recovery and follow-up limits.** Read existing output promptly when a launch
 fails; do not assume a quota error makes existing output unavailable or guarantees
@@ -232,8 +249,9 @@ Build trigger, monitoring, log, and cancellation semantics are recorded in
 
 Authority is `delegated-run`. Cursor documents environment and run diagnostics,
 Build inspection and triggering, environment proposals, and snapshot operations.
-Team administrators can disable the server, and visibility is scoped to the
-current user's runs.
+Team administrators can disable the server. Members see their own runs; the
+page's access table also lets team admins read other members' runs in
+repositories and environments the admin can access (`documented`, not live-verified).
 
 The delegated adapter handles the following environment-scoped tools:
 
@@ -265,6 +283,9 @@ by a delegated run at all.
 A 2026-08-29 live tool census counted 14 advertised tools, adding
 `get-message-queue` to the previously recorded inventory of 13. The census, not
 the documentation page, is the authority for whether an operation is absent.
+On 2026-10-14 the capabilities page lists 14 tools including `rename-chat` and
+not `get-message-queue`: `contradicted` against the census until a new live
+census.
 
 Current Cloud MCP coverage does not establish host-side Save, Build
 activation/deactivation, Build cancellation, environment restore, or rollback.
@@ -283,7 +304,7 @@ residual owner-action contract.
 This MCP exposes those controls as one Workspace Controls surface
 (`cursor_list_workspace_controls`, `cursor_inspect_workspace`,
 `cursor_get_workspace_control`). Writes appear as catalog rows, never as a verb. Tool names stay
-stable if an internal integration changes. Only the three API-key reads below are
+stable if an internal integration changes. Only the four API-key reads below are
 `supported` operations; the rest return explicit `unverified`, `unsupported`, or
 `unavailable-on-plan` results rather than guessed dashboard routes.
 
@@ -294,28 +315,43 @@ stable if an internal integration changes. Only the three API-key reads below ar
 | Connected repositories | `api-key` | `GET /v1/repositories`, `documented`, `observed` |
 | Default model/repository/base branch | `browser-session` | Dashboard-documented; programmatic contract `uncertain` |
 | Network mode and allowlist | `browser-session`, `admin` | Dashboard-documented; programmatic contract `uncertain` |
-| Secret names and metadata | `api-key` | `GET /v1/environments/{id}/secrets`, `GET /v1/team/secrets`, `GET /v1/secrets`, `documented`. Names, types, owners, repositories, and creation times only; the API publishes secret writes, but this server never performs them and never accepts or returns a value. |
+| Secret names and classes | `api-key` (REST), `browser-session`, `admin` | `documented`: `GET /v1/secrets`, `GET /v1/environments/{id}/secrets`, `GET /v1/team/secrets`, plus `PUT`/`DELETE` on `/v1/environments/{id}/secrets/{name}` and `/v1/team/secrets/{name}`. Lists never include values; Build Secrets cannot be set through the API. Secret 403 codes include `feature_unavailable` and `key_not_supported` (`grok_` API keys). Workspace Controls reads the name inventory; the writes are not implemented. Values are never an MCP read surface. |
+| Sub-tokens | `api-key` | `POST /v1/sub-tokens` (`documented`) issues a one-hour user-scoped token for My Machines workers. Self-hosted, so out of scope. |
 | MCP policy | `browser-session`, `admin` | Dashboard-documented; programmatic contract `uncertain` |
 | Team follow-up policy | `admin` | Separate team/admin surface |
 | Slack integration and notifications | `browser-session`, `admin` | Out of the initial lifecycle implementation scope |
+
+Cursor CLI drift (2026-10-14). The CLI changelog for v2026.10.08 says
+`agent env deploy` accepts comments and trailing commas. The local 2026.10.01
+bundle contains `env deploy` (TEAM or PERSONAL save) behind a feature gate, and
+its root help lists no `env` command (`observed`). The adapter in
+`src/cursor-cli.ts` maps get, list, publish, save, and delete only, so `deploy` is
+unmapped. The October release notes also allow trailing commas in environment
+files while the schema still declares `allowTrailingCommas: false`
+(`contradicted`; documented by release notes). The September notes make Builds
+mandatory. Neither note establishes a REST operation; do not infer one.
 
 Self-hosted pools, workers, claims, billing administration, and Cursor Origin are
 outside the current project scope.
 
 ## `@cursor/sdk` coverage
 
-Registry pin on 2026-08-28:
+Registry pin on 2026-10-14:
 
-- `latest`: `1.0.30`;
+- `latest`: `1.0.37`, published 2026-10-07;
 - `next`: `1.0.27-beta.0`;
-- Node requirement: `>=22.13`.
+- Node requirement: `>=22.13`;
+- PyPI `cursor-sdk` 1.0.37 also exists.
 
-At this pin, SDK documentation covers agent creation, follow-up, waiting, cancellation,
+Coverage below was last compared at `1.0.30` on 2026-08-28 and has not been
+re-diffed against 1.0.37.
+
+At that comparison, SDK documentation covers agent creation, follow-up, waiting, cancellation,
 listing, retrieval, archive/unarchive/delete, named cloud environments, usage,
 artifact listing/downloading, and run streaming.
 
 Environment CRUD, version Save/Restore, Build listing/trigger/cancel/activate,
-snapshot lifecycle, and rollback are not documented SDK capabilities at this pin.
+snapshot lifecycle, and rollback were not documented SDK capabilities then.
 
 This MCP uses its HTTP client for authentication, retries, timeouts, origin
 checks, and schema validation. Artifact downloads are returned as presigned URLs.
@@ -327,15 +363,19 @@ Upstream drift is reported; it does not block unrelated development.
 
 1. Re-fetch the official sources above.
 2. Diff OpenAPI paths, create-agent fields, status schemas, usage fields, and
-   rate-limit documentation.
+   rate-limit documentation. Include `/v1/secrets`, team secrets, and
+   `/v1/sub-tokens`.
 3. Run `npm view @cursor/sdk version engines dist.unpackedSize dist-tags --json`.
 4. Re-check SDK coverage for usage, artifacts, stream, named environments, and
    any new environment/Build methods.
 5. Re-fetch the environment schema and compare phase descriptions with the
    Builds documentation.
 6. Re-check Cloud MCP tools and Build trigger/activation/restore documentation.
-7. Reconcile changes with dated live evidence without overwriting the evidence.
-8. Keep contradictions labeled until an authoritative source or bounded live
+   Run a live census when the documented tool list disagrees with the last one.
+7. Re-check the CLI changelog for `agent env` commands, the Cloud Agents release
+   notes, and Codex's default MCP tool timeout (see [setup](setup.md#codex)).
+8. Reconcile changes with dated live evidence without overwriting the evidence.
+9. Keep contradictions labeled until an authoritative source or bounded live
    probe resolves them.
 
 Do not refresh by triggering Builds, saving environments, activating versions,
@@ -344,7 +384,11 @@ or inspecting secrets.
 ## Rate limits
 
 Measured 2026-09-25 with one API key (`observed`). Cursor publishes no figure for these
-endpoints; its documented 20 requests/minute default did not apply.
+endpoints; its documented 20 requests/minute default did not apply. OpenAPI
+(`documented`, 2026-10-14) gives repository listing (`GET /v1/repositories`) 1
+request per user per minute and 30 per user per hour; Cursor's
+[rate-limit page](https://cursor.com/docs/api#rate-limits) gives a generic default of
+20/minute unless overridden. These are not re-measured here.
 
 | Endpoint (as named in the 429 body) | Limit | Evidence |
 |---|---|---|
@@ -355,5 +399,5 @@ endpoints; its documented 20 requests/minute default did not apply.
 Limits are per endpoint. `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset`
 and `retry-after` (31-41 s observed) appear only on a 429, never on success. Sequential
 calls stayed latency-bound (about 60 reads or 42 writes per minute) and were never limited.
-Whether a limit is per key, user, or team is unknown. The bulk job defaults in
+For the measured endpoints, whether a limit is per key, user, or team is unknown. The bulk job defaults in
 [reference.md](reference.md) derive from these figures.
