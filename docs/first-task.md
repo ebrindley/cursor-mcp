@@ -1,13 +1,13 @@
 # Your first Cursor Cloud Agent task
 
 This guide is for cloud execution. For local Cursor work, follow the
-[execution-selection guidance](../README.md#local-cursor-or-cloud-agents).
+[execution-selection guidance](reference.md#local-cursor-or-cloud-agents).
 The goal here is one useful cloud task in one approved repository. You do not need to configure
 environment operations, a local Cursor CLI, or a self-hosted worker to do that.
 
 ## Try it without an account
 
-After [building the server](../README.md#1-build-the-server):
+After [building the server](reference.md#development):
 
 ```bash
 npm run demo
