@@ -107,6 +107,7 @@ Authority for this section is `api-key` unless stated otherwise.
 | Run stream | `documented`, `observed` | Full-history replay plus tail. REST remains the terminal-state authority; see `streaming.md`. |
 | Webhooks on v1 | `documented` | Still "coming soon" on 2026-10-14; no webhook contract to implement. |
 | Steering a running cloud run | `unavailable` | No cloud steering endpoint on 2026-10-14. SDK `run.steer()` steers only local foreground runs. |
+| Automatic PR creation | `observed` | On 2026-10-14, three `autoCreatePR: true` runs on one repository pushed branches but opened no PR, with or without `skipReviewerRequest`. Agent reads carried an undocumented `openAsCursorGithubApp: false`. Cause unconfirmed; `skipReviewerRequest` is verified only through readback. |
 | Non-GitHub repository hosts | `contradicted` | The endpoint page documents GitHub (Cloud and Enterprise Server), GitLab (Cloud and self-hosted), Bitbucket Cloud, and Azure DevOps; OpenAPI `RepoConfig.url` describes GitHub. Separately, this MCP's repository policy accepts only `github.com`, so a local rejection says nothing about upstream support. |
 | Replay retention | `uncertain` | Capture replay early with `cursor_export_run`. A retention duration without an established epoch is not an expiration deadline; upstream retention is not guaranteed by this server. |
 
@@ -117,7 +118,7 @@ Authority for this section is `api-key` unless stated otherwise.
 |---|---|---|
 | `prompt.images` | At most 5, 15 MB each | Implemented |
 | `skipReviewerRequest` | Only with `autoCreatePR` | Implemented |
-| `customSubagents` | At most 20; create-only | Implemented |
+| `customSubagents` | At most 20; create-only | Implemented. OpenAPI lists `Agent.customSubagents` on reads, but a live `GET /v1/agents/{id}` on 2026-10-14 omitted it; only the create response echoes it (`contradicted`). |
 | `mcpServers` | At most 50; a follow-up replaces the create-time set | Deferred: definitions can carry credentials into host transcripts, and command allowlists cannot constrain arbitrary `npx` arguments. Needs a policy design. |
 | `envVars` | At most 50; beta; silently ignored when not enabled; cannot combine with a client `agentId` | Deferred: conflicts with the always-sent client `agentId` used for create recovery. |
 

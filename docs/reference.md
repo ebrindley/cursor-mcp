@@ -254,7 +254,7 @@ which this server does not do.
 | `cursor_inspect_workspace` | `GET /v1/me` plus catalog | |
 | `cursor_get_workspace_control` | live API-key read, or a capability result; for `secrets`, `GET /v1/environments/{id}/secrets`, `GET /v1/team/secrets`, or `GET /v1/secrets` by `scope` | |
 | `cursor_list_agents` | `GET /v1/agents`, optionally filtered by `prUrl`, plus one `GET /v1/agents/{id}` per listed summary too thin to check against the policy | |
-| `cursor_get_agent` | `GET /v1/agents/{id}` | Reads back `autoCreatePR`, `skipReviewerRequest`, and `customSubagents` (names only) when Cursor returns them; absent fields stay absent |
+| `cursor_get_agent` | `GET /v1/agents/{id}` | Reads back `autoCreatePR`, `skipReviewerRequest`, and `customSubagents` (names only) when Cursor returns them; absent fields stay absent. Cursor currently omits `customSubagents` on reads |
 | `cursor_list_runs` | `GET /v1/agents/{id}/runs` | |
 | `cursor_get_run` | `GET /v1/agents/{id}/runs/{runId}` | |
 | `cursor_wait_run` | `GET /v1/agents/{id}/runs/{runId}`, polled until terminal or 45 s | |
