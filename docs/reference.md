@@ -165,6 +165,12 @@ must also be listed under `profiles.*.repos`. Create results report the exact en
 repository set, and starting refs Cursor returned. `targetVerified`, `sourcePinned`, and
 `metadataVerified` distinguish readback proof from a requested option.
 
+`cursor_create_agent` accepts an optional `skipReviewerRequest` boolean, forwarded only when
+`autoCreatePR` resolves true (including a profile-pinned value); `true` is rejected before any
+request otherwise. Omitted, it is omitted from the body. The result reports the forwarded value as
+`skipReviewerRequest` and `skipReviewerRequestVerified` (true when the returned agent echoes it,
+false on a different value, absent when Cursor did not echo it; a mismatch is reported, not an error).
+
 ## Configuration
 
 | Variable | Purpose |

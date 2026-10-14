@@ -1258,6 +1258,80 @@ describe("cursor_create_agent", () => {
     expect(unconfirmedBody.metadata).toEqual({ ticket: "ENG-2" });
   });
 
+  describe("skipReviewerRequest", () => {
+    const create = (
+      client: Awaited<ReturnType<typeof connect>>,
+      extra: Record<string, unknown>,
+    ) =>
+      client.callTool({
+        name: "cursor_create_agent",
+        arguments: { repo: "ExampleOrg/ExampleRepo", prompt: "x", ...extra },
+      });
+    const sentBody = () =>
+      JSON.parse(String((fetchImpl.mock.calls[0]![1] as RequestInit).body));
+
+    it("forwards the flag with autoCreatePR and reports a matching readback", async () => {
+      fetchImpl.mockResolvedValue(json(createdPayload({ skipReviewerRequest: true })));
+      const client = await connect(fetchImpl, policy(["*"]));
+      const result = await create(client, { autoCreatePR: true, skipReviewerRequest: true });
+      expect(sentBody()).toMatchObject({ autoCreatePR: true, skipReviewerRequest: true });
+      expect(result.structuredContent).toMatchObject({
+        skipReviewerRequest: true,
+        skipReviewerRequestVerified: true,
+      });
+    });
+
+    it("forwards the flag under a profile that pins autoCreatePR true", async () => {
+      fetchImpl.mockResolvedValue(json(createdPayload()));
+      const client = await connect(fetchImpl, policy(["*"], ["ExampleOrg/ExampleRepo"], true));
+      await create(client, { skipReviewerRequest: true });
+      expect(sentBody()).toMatchObject({ autoCreatePR: true, skipReviewerRequest: true });
+    });
+
+    it("rejects true before any request when autoCreatePR is not true", async () => {
+      const client = await connect(fetchImpl, policy(["*"]));
+      for (const extra of [{}, { autoCreatePR: false }]) {
+        const result = await create(client, { ...extra, skipReviewerRequest: true });
+        expect(result.isError).toBe(true);
+        expect(text(result)).toContain("skipReviewerRequest only applies when autoCreatePR");
+      }
+      const pinned = await connect(fetchImpl, policy(["*"], ["ExampleOrg/ExampleRepo"], false));
+      const result = await create(pinned, { skipReviewerRequest: true });
+      expect(result.isError).toBe(true);
+      expect(text(result)).toContain("skipReviewerRequest only applies when autoCreatePR");
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it("reports a differing echo as unverified without failing", async () => {
+      fetchImpl.mockResolvedValue(json(createdPayload({ skipReviewerRequest: false })));
+      const client = await connect(fetchImpl, policy(["*"]));
+      const result = await create(client, { autoCreatePR: true, skipReviewerRequest: true });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        skipReviewerRequest: true,
+        skipReviewerRequestVerified: false,
+      });
+      expect(text(result)).toContain("skipReviewerRequest readback differs");
+    });
+
+    it("omits the verdict when Cursor does not echo the flag", async () => {
+      fetchImpl.mockResolvedValue(json(createdPayload()));
+      const client = await connect(fetchImpl, policy(["*"]));
+      const result = await create(client, { autoCreatePR: true, skipReviewerRequest: true });
+      expect(result.structuredContent).toMatchObject({ skipReviewerRequest: true });
+      expect(result.structuredContent).not.toHaveProperty("skipReviewerRequestVerified");
+    });
+
+    it("leaves the body and result unchanged when omitted", async () => {
+      fetchImpl.mockResolvedValue(json(createdPayload()));
+      const client = await connect(fetchImpl, policy(["*"]));
+      const result = await create(client, { autoCreatePR: true });
+      expect(sentBody()).not.toHaveProperty("skipReviewerRequest");
+      expect(result.structuredContent).not.toHaveProperty("skipReviewerRequest");
+      expect(result.structuredContent).not.toHaveProperty("skipReviewerRequestVerified");
+    });
+  });
+
   it("does not expose provider credential fields on the launch tool", async () => {
     const client = await connect(fetchImpl, policy(["*"]));
     const { tools } = await client.listTools();

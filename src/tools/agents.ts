@@ -1059,6 +1059,10 @@ export function registerAgentTools(
           .describe("Caller tags persisted on the agent. Echoed only when read back."),
         name: z.string().min(1).max(100).optional(),
         autoCreatePR: z.boolean().optional(),
+        skipReviewerRequest: z
+          .boolean()
+          .optional()
+          .describe("Skip requesting the user as a reviewer on the PR Cursor opens. Only applies when autoCreatePR resolves true; true is rejected otherwise."),
         mode: z.enum(["agent", "plan"]).optional(),
       },
       outputSchema: {
@@ -1083,6 +1087,11 @@ export function registerAgentTools(
         workOnCurrentBranch: z.boolean().optional(),
         metadata: z.record(z.string(), z.string()).optional(),
         metadataVerified: z.boolean().optional(),
+        skipReviewerRequest: z.boolean().optional().describe("The value forwarded to Cursor."),
+        skipReviewerRequestVerified: z
+          .boolean()
+          .optional()
+          .describe("Whether the returned agent echoed the requested value; omitted when Cursor did not echo it."),
       },
       annotations: CREATE,
     },
@@ -1100,10 +1109,19 @@ export function registerAgentTools(
       metadata?: Record<string, string>;
       name?: string;
       autoCreatePR?: boolean;
+      skipReviewerRequest?: boolean;
       mode?: "agent" | "plan";
     }) => {
       const launch = resolveCreateAgentLaunch(profile, args);
       const autoCreatePR = resolveAutoCreatePR(profile, args.autoCreatePR);
+      if (args.skipReviewerRequest === true && !autoCreatePR) {
+        throw new PolicyError(
+          "skipReviewerRequest only applies when autoCreatePR resolves true; autoCreatePR is false for this call",
+        );
+      }
+      // Cursor ignores the field without autoCreatePR, so an explicit false is
+      // not forwarded there and no readback is claimed for it.
+      const skipReviewerRequest = autoCreatePR ? args.skipReviewerRequest : undefined;
       const model = resolveModel(profile, args.model);
       const metadata =
         args.metadata === undefined || Object.keys(args.metadata).length === 0
@@ -1134,6 +1152,7 @@ export function registerAgentTools(
             ...(args.name === undefined ? {} : { name: args.name }),
             ...(args.mode === undefined ? {} : { mode: args.mode }),
             ...(metadata === undefined ? {} : { metadata }),
+            ...(skipReviewerRequest === undefined ? {} : { skipReviewerRequest }),
           },
         }),
       ));
@@ -1187,6 +1206,10 @@ export function registerAgentTools(
           : Object.entries(metadata).every(
               ([key, value]) => created.agent.metadata?.[key] === value,
             );
+      const skipReviewerRequestVerified =
+        skipReviewerRequest === undefined || created.agent.skipReviewerRequest === undefined
+          ? undefined
+          : created.agent.skipReviewerRequest === skipReviewerRequest;
       return ok({
         source: "POST /v1/agents",
         text: [
@@ -1203,6 +1226,9 @@ export function registerAgentTools(
             : []),
           ...(sourcePinned === false
             ? ["source pinning was requested but not confirmed by readback"]
+            : []),
+          ...(skipReviewerRequestVerified === false
+            ? ["skipReviewerRequest readback differs from the requested value"]
             : []),
         ].join("\n"),
         structured: {
@@ -1229,6 +1255,8 @@ export function registerAgentTools(
             ? {}
             : { metadata: created.agent.metadata }),
           ...(metadataVerified === undefined ? {} : { metadataVerified }),
+          ...(skipReviewerRequest === undefined ? {} : { skipReviewerRequest }),
+          ...(skipReviewerRequestVerified === undefined ? {} : { skipReviewerRequestVerified }),
         },
         policy,
       });

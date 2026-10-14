@@ -86,6 +86,7 @@ export const AgentSchema = z.looseObject({
   env: z.looseObject({ type: z.string(), name: z.string().optional() }).optional(),
   repos: z.array(RepoConfigSchema).optional(),
   autoCreatePR: z.boolean().optional(),
+  skipReviewerRequest: z.boolean().optional(),
   workOnCurrentBranch: z.boolean().optional(),
   metadata: z.record(z.string(), z.string()).optional(),
   latestRunId: z.string().optional(),
