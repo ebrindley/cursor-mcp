@@ -26,9 +26,9 @@
 
 import { requestScope } from "./request-context.js";
 import { within, type WaitScope } from "./wait.js";
+import { readTrustedFile } from "./trusted-folder.js";
 import { createHash } from "node:crypto";
-import { open, realpath } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { z } from "zod";
 import type { CapabilityAuthority, EnvironmentManagedAs } from "./lifecycle-model.js";
 import { managedAsFromPath } from "./lifecycle-model.js";
@@ -1106,68 +1106,24 @@ async function readLocalDefinitionWithin(repoRoot: string, scope: WaitScope): Pr
   }
   const root = resolve(repoRoot);
   const path = join(root, DEFINITION_PATH);
-  try {
-    scope.throwIfStopped();
-    const [resolvedRoot, resolvedFile] = await Promise.all([
-      realpath(root),
-      realpath(path),
-    ]);
-    const fromRoot = relative(resolvedRoot, resolvedFile);
-    if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+  scope.throwIfStopped();
+  const read = await readTrustedFile(root, DEFINITION_PATH, MAX_DEFINITION_BYTES, scope);
+  switch (read.kind) {
+    case "absent":
+      return { present: false, path };
+    case "outside":
       throw new Error(`${DEFINITION_PATH} resolves outside the repository root`);
-    }
-
-    scope.throwIfStopped();
-    const handle = await open(resolvedFile, "r");
-    try {
-      scope.throwIfStopped();
-      const stat = await handle.stat();
-      if (stat.size > MAX_DEFINITION_BYTES) {
-        return {
-          present: true,
-          path,
-          tooLarge: true,
-          sizeBytes: stat.size,
-        };
-      }
-      // Read at most one byte past the limit. A file that grows after `stat`
-      // cannot make this operation allocate or return an unbounded payload.
-      const buffer = Buffer.alloc(MAX_DEFINITION_BYTES + 1);
-      let bytesRead = 0;
-      while (bytesRead < buffer.length) {
-        scope.throwIfStopped();
-        const chunk = await handle.read(
-          buffer,
-          bytesRead,
-          buffer.length - bytesRead,
-          bytesRead,
-        );
-        if (chunk.bytesRead === 0) break;
-        bytesRead += chunk.bytesRead;
-      }
-      if (bytesRead > MAX_DEFINITION_BYTES) {
-        return {
-          present: true,
-          path,
-          tooLarge: true,
-          sizeBytes: bytesRead,
-        };
-      }
+    case "notFile":
+      throw new Error(`${DEFINITION_PATH} is not a regular file`);
+    case "tooLarge":
+      return { present: true, path, tooLarge: true, sizeBytes: read.sizeBytes };
+    case "ok":
       return {
         present: true,
         path,
-        text: buffer.subarray(0, bytesRead).toString("utf8"),
-        sizeBytes: bytesRead,
+        text: read.bytes.toString("utf8"),
+        sizeBytes: read.bytes.length,
       };
-    } finally {
-      await handle.close();
-    }
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    // ENOTDIR and ENOENT are both "no definition here". Anything else -- a
-    // permission failure, for instance -- is reported rather than read as absent.
-    if (code === "ENOENT" || code === "ENOTDIR") return { present: false, path };
-    throw error;
   }
 }
 
