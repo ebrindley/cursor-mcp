@@ -195,13 +195,23 @@ values are rejected because no corresponding control exists.
 
 `cursor_create_agent` and `cursor_create_run` accept up to 5 `images`, sent as
 `prompt.images`. Each entry is `{url}` (https only, no credentials in the URL; Cursor fetches
-it) or `{data, mimeType}` (standard base64 with no `data:` prefix; `image/png`, `image/jpeg`,
-`image/gif`, or `image/webp`), plus an optional `dimension: {width, height}`. Inline images
-total at most 5 MiB decoded per call (base64 adds a third), and the whole tool call, prompt
-included, must stay under the MCP stdio transport's 10 MiB message limit; the API's 15 MB
-per-image limit is also checked. Larger images go by `url`. A violation is refused before
-any request. Image bytes and URLs are never echoed in text, structured output, errors, or
-logs, and any that an upstream error quotes are replaced with `[image]`; results report only `imageCount`, and only when images
+it), `{data, mimeType}` (standard base64 with no `data:` prefix; `image/png`, `image/jpeg`,
+`image/gif`, or `image/webp`), or `{path}`, plus an optional `dimension: {width, height}`.
+Inline images total at most 5 MiB decoded per call (base64 adds a third), and the whole tool
+call, prompt included, must stay under the MCP stdio transport's 10 MiB message limit.
+
+A `{path}` image is a local file the server reads and sends inline, so its bytes do not count
+against the stdio limit. The path is absolute or relative to the server's working directory,
+which is the folder the host started it in and trusts (the project in Claude Code, the
+workspace in Codex). Paths that resolve outside it, symlinks included, are refused, and path
+images are off when that directory is the home directory or a filesystem root. Only regular
+files ending in `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp` whose leading bytes match that
+format are read; `mimeType` comes from the bytes. This catches a wrong path, not a crafted
+file, and the bytes, metadata included, are uploaded unchanged.
+
+Each image is at most 15 MB and all images in a call total at most 15 MB decoded. A violation
+is refused before any request. Image bytes, URLs and paths are never echoed in text,
+structured output, errors, or logs, and any that an upstream error quotes are replaced with `[image]`; results report only `imageCount`, and only when images
 were sent. Omitting `images` leaves the request body unchanged. Delegated
 runs and environment-lifecycle launches do not take images.
 

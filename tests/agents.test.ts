@@ -6,6 +6,9 @@
  * covered by one shape assertion each rather than one per field.
  */
 
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -3828,6 +3831,35 @@ describe("prompt images", () => {
     expect(text(single)).not.toContain("AAAAAAAA");
     expect(text(total)).not.toContain("AAAAAAAA");
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("reads path images from the working directory before any request", async () => {
+    fetchImpl.mockImplementation(async () => json(createdPayload()));
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "cursor-mcp-shot-")));
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+    writeFileSync(join(root, "shot.png"), png);
+    writeFileSync(join(root, ".env.png"), "TOKEN=abc");
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(root);
+    try {
+      const client = await connect(fetchImpl, policy(["*"]));
+      const refused = await client.callTool({
+        name: "cursor_create_run",
+        arguments: { agentId: "bc-1", prompt: "x", images: [{ path: join(root, ".env.png") }] },
+      });
+      expect(refused.isError).toBe(true);
+      expect(text(refused)).not.toContain(root);
+      expect(fetchImpl).not.toHaveBeenCalled();
+
+      const created = await client.callTool({
+        name: "cursor_create_agent",
+        arguments: { ...repo, images: [{ path: join(root, "shot.png") }] },
+      });
+      expect(created.isError, text(created)).toBeFalsy();
+      expect(bodyOf(0).prompt.images).toEqual([{ data: png.toString("base64"), mimeType: "image/png" }]);
+      expect(JSON.stringify(created)).not.toContain(root);
+    } finally {
+      cwd.mockRestore();
+    }
   });
 
   it("never reports image data or urls in results or logs", async () => {

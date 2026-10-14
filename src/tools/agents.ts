@@ -1174,7 +1174,7 @@ export function registerAgentTools(
       customSubagents?: CustomSubagent[];
     }) => {
       const launch = resolveCreateAgentLaunch(profile, args);
-      const images = promptImages(args.images);
+      const images = await promptImages(args.images);
       const autoCreatePR = resolveAutoCreatePR(profile, args.autoCreatePR);
       if (args.skipReviewerRequest === true && !autoCreatePR) {
         throw new PolicyError(
@@ -1379,7 +1379,7 @@ export function registerAgentTools(
       mode?: "agent" | "plan";
     }) => {
       const model = resolveModel(profile, args.model);
-      const images = promptImages(args.images);
+      const images = await promptImages(args.images);
       await scope.assert(args.agentId);
       const send = <T>(call: () => Promise<T>) => (images === undefined ? call() : images.shield(call));
       const created = await withUsageGuidance(() => send(() =>

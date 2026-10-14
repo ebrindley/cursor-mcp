@@ -116,7 +116,7 @@ Authority for this section is `api-key` unless stated otherwise.
 
 | Field | Documented limits | MCP status |
 |---|---|---|
-| `prompt.images` | At most 5, 15 MB each | Implemented |
+| `prompt.images` | At most 5, 15 MB each | Implemented, including local `path` files from the server's working directory |
 | `skipReviewerRequest` | Only with `autoCreatePR` | Implemented |
 | `customSubagents` | At most 20; create-only | Implemented. OpenAPI lists `Agent.customSubagents` on reads, but a live `GET /v1/agents/{id}` on 2026-10-14 omitted it; only the create response echoes it (`contradicted`). |
 | `mcpServers` | At most 50; a follow-up replaces the create-time set | Deferred: definitions can carry credentials into host transcripts, and command allowlists cannot constrain arbitrary `npx` arguments. Needs a policy design. |
