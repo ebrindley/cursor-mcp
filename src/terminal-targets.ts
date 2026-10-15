@@ -83,6 +83,10 @@ export class TerminalTargets {
     } finally { target.inFlight--; }
   }
 
+  markDelivered(agentId: string, commandId: string, from: number, to: number, length: number) {
+    this.targets.get(agentId)?.terminal.markDelivered(commandId, from, to, length);
+  }
+
   close() {
     this.closed = true;
     for (const target of this.targets.values()) { target.terminal.close(); target.sessions.close(); }

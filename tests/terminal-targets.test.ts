@@ -117,7 +117,7 @@ test('uncertain execution retains capacity without blocking another target; shut
     await targets.handle('b', 'execute', command(b.sessionId)); await peers.get('b')!.started();
     peers.get('b')!.finish('still works'); await finished(targets, 'b', command(b.sessionId));
     expect(await targets.handle('c', 'status', {})).toMatchObject({ status: 'target_capacity' });
-    expect(await targets.handle('a', 'reset', command(a.sessionId))).toMatchObject({ status: 'reset_blocked' });
+    expect(await targets.handle('a', 'reset', command(a.sessionId))).toMatchObject({ status: 'reset', carriedResults: 1 });
     targets.close();
     expect(closes).toHaveLength(4);
     for (const close of closes) expect(close).toHaveBeenCalledOnce();

@@ -8,7 +8,7 @@ export const MAX_OUTPUT_CODE_POINTS = 16384;
 export function terminalText(result: Record<string, unknown>): string {
   const summary = Object.fromEntries([
     'agentId', 'status', 'sessionId', 'commandId', 'terminalId', 'nextCreateSequence',
-    'maxTargets', 'retainedTargets', 'targetOffset', 'targetNextOffset', 'state', 'commandOutcome', 'exitCode', 'signal', 'reason', 'httpStatus', 'failedOperation', 'cleanup', 'outputComplete',
+    'maxTargets', 'retainedTargets', 'carriedResults', 'targetOffset', 'targetNextOffset', 'state', 'commandOutcome', 'exitCode', 'signal', 'reason', 'httpStatus', 'failedOperation', 'cleanup', 'outputComplete',
     'outputReadFailed', 'outputTruncated', 'outputOffset', 'outputNextOffset', 'outputLength',
     'outputStartOffset', 'outputEndOffset', 'outputGap', 'reconnectGapPossible', 'inputOutcome', 'nextInputSequence', 'remoteOutcome', 'bytes', 'maxBytes',
     'wakeOutcome', 'readiness', 'failureStage', 'serverElapsedMs', 'machineChanged', 'reattachments', 'continuityUncertain', 'hint', 'output',

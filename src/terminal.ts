@@ -14,18 +14,27 @@ type Command = {
   reattachments: number; continuityUncertain: boolean; resumable: boolean; gapCheck: boolean;
   lastEventId?: string; lastSeq?: number; seen: Set<string>;
   bytes: Buffer; machineId?: string; ptyId?: string; peer?: TerminalPeer; wake?: (reason: string) => void;
-  httpStatus?: number; failedOperation?: string;
+  httpStatus?: number; failedOperation?: string; deliveredTo: number; fullyRead: boolean;
 };
+/** What a released command ID keeps: enough to refuse re-execution and report how it ended. */
+type Released = { digest: string; commandOutcome: Command['commandOutcome']; exitCode: number | null; signal: number | null };
 
 const MAX_COMMAND_BYTES = 16384;
 const MAX_REATTACHMENTS = 3;
+/** Released command IDs kept per session; once full, nothing more is released and capacity refuses as before. */
+const MAX_RELEASED = 4096;
+/** Cleanup states after which no remote process can still belong to the command. machine_changed is excluded: the
+ *  original VM was never checked. */
+const RESOLVED_CLEANUP = new Set(['process_exited', 'process_not_listed', 'not_created']);
 /** Transport-class loss only. Cancellation, auth, protocol and reaped-PTY failures are never reattached. */
 const RESUMABLE = new Set(['stream_ended_without_exit', 'gateway_unavailable', 'gateway_disconnected',
   'gateway_send_failed', 'terminal_connection_failed']);
-/** One owned process at a time; retained IDs are never evicted and silently executed again. */
+/** One owned process at a time. A full session releases its oldest settled, fully read result; a released ID keeps a
+ *  record so resending it is reported, never executed again. */
 export class TerminalService {
   sessionId = randomUUID();
   private readonly results = new Map<string, Command>();
+  private readonly released = new Map<string, Released>();
   private active: Command | undefined;
   private closed = false;
   private readonly shutdown = new AbortController();
@@ -145,7 +154,7 @@ export class TerminalService {
     if (signal?.aborted) return { status: 'request_cancelled', ...(request.operation === 'execute' ? { commandOutcome: 'not_submitted' } : {}) };
     if (request.operation === 'status') {
       const base = { sessionId: this.sessionId, agentId: this.agentId, activeCommandId: this.active?.commandId ?? null,
-        retainedResults: this.results.size, maxOutputBytes: this.maxOutputBytes, maxResults: this.maxResults };
+        retainedResults: this.results.size, releasedResults: this.released.size, maxOutputBytes: this.maxOutputBytes, maxResults: this.maxResults };
       if (this.closed) return { ...base, status: 'closed' };
       const scope = requestScope(30000);
       try {
@@ -155,15 +164,18 @@ export class TerminalService {
     }
     if (request.sessionId !== this.sessionId) return { status: 'session_mismatch', sessionId: this.sessionId };
     if (request.operation === 'reset') {
-      if (this.active || [...this.results.values()].some(op => op.state !== 'finished' || !['process_exited', 'process_not_listed', 'not_created'].includes(op.cleanup)))
-        return { status: 'reset_blocked' };
       if (this.closed) return { status: 'closed' };
-      this.results.clear(); this.sessionId = randomUUID();
-      return { status: 'reset', sessionId: this.sessionId };
+      // Unresolved and active records move to the new session so their IDs stay deduplicated and readable.
+      for (const [id, op] of this.results) if (this.settled(op)) this.results.delete(id);
+      this.released.clear(); this.sessionId = randomUUID();
+      return { status: 'reset', sessionId: this.sessionId, carriedResults: this.results.size };
     }
     if (request.operation === 'read' || request.operation === 'cancel') {
       const op = this.results.get(request.commandId ?? '');
-      if (!op) return { status: 'not_retained', sessionId: this.sessionId };
+      if (!op) {
+        const gone = this.released.get(request.commandId ?? '');
+        return gone ? this.releasedResult(request.commandId!, gone) : { status: 'not_retained', sessionId: this.sessionId };
+      }
       const offset = request.outputOffset ?? 0, limit = request.outputLimit ?? 2000;
       if (!Number.isInteger(offset) || offset < 0 || offset > 65536 || !Number.isInteger(limit) || limit < 1 || limit > MAX_OUTPUT_CODE_POINTS) return { status: 'invalid_request' };
       if (request.operation === 'cancel' && op.state === 'finished' && op.cleanup === 'termination_unconfirmed' && op.ptyId && !this.closed) {
@@ -186,17 +198,48 @@ export class TerminalService {
     const digest = createHash('sha256').update(JSON.stringify([command, timeoutMs])).digest('hex');
     const previous = this.results.get(commandId);
     if (previous) return previous.digest === digest ? this.snapshot(previous) : { status: 'command_id_conflict' };
+    const gone = this.released.get(commandId);
+    if (gone) return gone.digest === digest ? this.releasedResult(commandId, gone) : { status: 'command_id_conflict' };
     if (this.closed) return { status: 'closed', commandOutcome: 'not_submitted' };
     if (this.active) return { status: 'busy', commandOutcome: 'not_submitted' };
-    if (this.results.size >= this.maxResults) return { status: 'session_capacity', commandOutcome: 'not_submitted' };
+    if (this.results.size >= this.maxResults && !this.releaseOldest()) return { status: 'session_capacity', commandOutcome: 'not_submitted' };
     const op: Command = { commandId, digest, state: 'starting', commandOutcome: 'not_submitted', exitCode: null, signal: null,
       executionEnded: false, outputComplete: false, outputReadFailed: false, outputTruncated: false,
       cancelRequested: false, cleanup: 'pending', reason: null, reattachments: 0, continuityUncertain: false,
-      resumable: true, gapCheck: false, seen: new Set(), bytes: Buffer.alloc(0) };
+      resumable: true, gapCheck: false, seen: new Set(), bytes: Buffer.alloc(0), deliveredTo: 0, fullyRead: false };
     this.results.set(commandId, op); this.active = op;
     // An MCP request's signal is intentionally not the lifetime of the accepted command.
     void independently(() => this.run(op, command, timeoutMs!));
     return this.snapshot(op);
+  }
+
+  /** Record a page delivered after response fitting. Only contiguous pages from offset zero count, so a skipped or
+   *  out-of-range read never makes a finished result releasable. */
+  markDelivered(commandId: string, from: number, to: number, length: number) {
+    const op = this.results.get(commandId);
+    if (!op || from > op.deliveredTo) return;
+    op.deliveredTo = Math.max(op.deliveredTo, to);
+    if (op.state === 'finished' && op.deliveredTo >= length) op.fullyRead = true;
+  }
+
+  /** Finished, with no remote process that could still belong to it. */
+  private settled(op: Command) { return op.state === 'finished' && RESOLVED_CLEANUP.has(op.cleanup); }
+
+  /** Release the oldest settled result the caller has read to the end; false when none qualifies. */
+  private releaseOldest(): boolean {
+    if (this.released.size >= MAX_RELEASED) return false;
+    for (const [id, op] of this.results) {
+      if (!this.settled(op) || !op.fullyRead) continue;
+      this.results.delete(id);
+      this.released.set(id, { digest: op.digest, commandOutcome: op.commandOutcome, exitCode: op.exitCode, signal: op.signal });
+      return true;
+    }
+    return false;
+  }
+
+  private releasedResult(commandId: string, gone: Released) {
+    return { status: 'result_released', sessionId: this.sessionId, agentId: this.agentId, commandId,
+      commandOutcome: gone.commandOutcome, exitCode: gone.exitCode, signal: gone.signal };
   }
 
   private async run(op: Command, command: string, timeoutMs: number) {

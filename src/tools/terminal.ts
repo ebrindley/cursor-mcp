@@ -16,7 +16,7 @@ import { READ, CANCEL, DESTRUCTIVE, REVERSIBLE } from './annotations.js';
 const STREAM_LOSS_HINT = 'Output stream failed; see reason and cleanup. Do not resubmit uncertain work. For future jobs needing results after MCP restart, use caller-owned detached tmux with output and exit-status files, polled by short commands.';
 
 export function registerTerminalTools(server: McpServer, policy: Policy, apiKey = '',
-  supplied?: Pick<TerminalService, 'handle' | 'close'>, scope?: Pick<AgentScope, 'assert'>): string[] {
+  supplied?: Pick<TerminalService, 'handle' | 'close' | 'markDelivered'>, scope?: Pick<AgentScope, 'assert'>): string[] {
   const config = policy.terminal;
   if (!config) return [];
   const targets = new TerminalTargets(agentId => {
@@ -82,6 +82,10 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
     // returned cursor has already skipped past.
     const paged = raw.outputReadFailed === true ? { ...raw, hint: STREAM_LOSS_HINT } : raw;
     const result = fitTerminalPage(paged, policy.maxResponseBytes);
+    // Delivered pages decide when a finished result may be released as the session fills.
+    if (result.status === 'command' && typeof result.agentId === 'string' && typeof result.commandId === 'string' &&
+      typeof result.outputOffset === 'number' && typeof result.outputNextOffset === 'number' && typeof result.outputLength === 'number')
+      targets.markDelivered(result.agentId, result.commandId, result.outputOffset, result.outputNextOffset, result.outputLength);
     return ok({ source: 'Cursor direct VM terminal', text: terminalText(result), structured: result, policy });
   };
   const add = (operation: string, description: string, schema: z.ZodRawShape, annotations: typeof READ | typeof CANCEL | typeof DESTRUCTIVE | typeof REVERSIBLE) => {
@@ -97,10 +101,10 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
     // The service returns structured size-limit rejections.
     { sessionId, commandId: id, command: z.string().min(1).refine(value => !value.includes('\0'), 'command must not contain NUL'),
       timeoutMs: z.number().int().min(1).max(300000).default(30000) }, DESTRUCTIVE);
-  add('read', 'Read retained Cloud Agent VM command output. Follow outputNextOffset (Unicode code points). Request up to 16384 code points per page (default 2000); the response byte budget may return fewer. Retains first 64 KiB; outputTruncated marks loss. outputComplete means process exit observed, not lossless output. not_retained never proves non-execution.',
+  add('read', 'Read retained Cloud Agent VM command output. Follow outputNextOffset (Unicode code points). Request up to 16384 code points per page (default 2000); the response byte budget may return fewer. Retains first 64 KiB; outputTruncated marks loss. outputComplete means process exit observed, not lossless output. not_retained never proves non-execution. result_released means the ID ran, was read to the end and released; it is never run again.',
     { sessionId, commandId: id, outputOffset: z.number().int().min(0).max(65536).default(0), outputLimit: z.number().int().min(1).max(MAX_OUTPUT_CODE_POINTS).default(2000) }, READ);
   add('cancel', 'Terminate an owned command and verify PTY absence on its original machine. Unknown cleanup can be retried; absence does not prove descendant exit. MCP cancellation is separate.', { sessionId, commandId: id }, CANCEL);
-  add('reset', 'Release settled command results and rotate command sessionId. Refuses active work or unresolved cleanup. Old session IDs fail; interactive terminals are unaffected.', { sessionId }, CANCEL);
+  add('reset', 'Release settled command results and rotate command sessionId. Active or unresolved results carry into the new session. Old session IDs fail; interactive terminals are unaffected.', { sessionId }, CANCEL);
   const owned = { sessionId, terminalId: z.string().uuid() };
   const sequence = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER - 1);
   const dimensions = { cols: z.number().int().min(2).max(500), rows: z.number().int().min(2).max(300) };

@@ -310,7 +310,7 @@ test('real MCP validates source and emits sanitized terminal output and identifi
     ? { status: 'command', state: 'finished', sessionId: '11111111-1111-4111-8111-111111111111', commandId: 'two', commandOutcome: 'unknown', exitCode: null,
       reason: 'stream_ended_without_exit', cleanup: 'process_not_listed', outputReadFailed: true, reattachments: 3,
       continuityUncertain: true, outputOffset: 0, outputLength: 0, output: '' }
-    : { status: 'command', state: 'finished', sessionId: '11111111-1111-4111-8111-111111111111', commandId: 'one', output: '\u001b[31mUNIQUE_PAYLOAD', outputTruncated: true, exitCode: 7 }; }, close() {} };
+    : { status: 'command', state: 'finished', sessionId: '11111111-1111-4111-8111-111111111111', commandId: 'one', output: '\u001b[31mUNIQUE_PAYLOAD', outputTruncated: true, exitCode: 7 }; }, close() {}, markDelivered() {} };
   const server = new McpServer({ name: 'fixture', version: '1' });
   registerTerminalTools(server, PolicySchema.parse({ deleteEnabled: true, terminal: { agentId: 'bc-test', executeEnabled: true },
     defaultProfile: 'terminal', profiles: { terminal: { tools: ['cursor_terminal_status', 'cursor_terminal_execute', 'cursor_terminal_read'] } } }), '', backend);
@@ -393,7 +393,7 @@ test('multi-target configuration is explicit and keeps the thirteen-tool surface
 test('MCP target selection enforces pinned identity and profile scope before backend admission', async () => {
   for (const mode of ['pinned', 'profile', 'missing-scope'] as const) {
     const calls: Record<string, unknown>[] = [];
-    const backend = { async handle(input: Record<string, unknown>) { calls.push(input); return { status: 'ready' }; }, close() {} };
+    const backend = { async handle(input: Record<string, unknown>) { calls.push(input); return { status: 'ready' }; }, close() {}, markDelivered() {} };
     const scope = { assert: vi.fn(async (agentId: string) => { if (agentId === 'bc-denied') throw new Error('target denied'); }) };
     const server = new McpServer({ name: 'fixture', version: '1' });
     registerTerminalTools(server, PolicySchema.parse({ terminal: { agentId: mode === 'pinned' ? 'bc-default' : undefined,
@@ -451,7 +451,7 @@ test('profile-owned output and cleanup survive scope API failure while new work 
 test('target overview shrinks to budget without skipping retained entries', async () => {
   const server = new McpServer({ name: 'fixture', version: '1' });
   registerTerminalTools(server, PolicySchema.parse({ terminal: { targets: 'profile' }, maxResponseBytes: 1024 }), '',
-    { async handle() { return { status: 'ready' }; }, close() {} }, { async assert() {} });
+    { async handle() { return { status: 'ready' }; }, close() {}, markDelivered() {} }, { async assert() {} });
   const client = new Client({ name: 'fixture-client', version: '1' });
   const [ct, st] = InMemoryTransport.createLinkedPair(); await server.connect(st); await client.connect(ct);
   const ids = Array.from({ length: 8 }, (_, i) => `bc-${i}${'a'.repeat(124)}`);
@@ -640,14 +640,54 @@ test.each(['backoff', 'connect', 'deadline'] as const)('%s interruption installs
   expect(f.calls.filter(x => x === 'SpawnPty')).toHaveLength(1); f.service.close();
 });
 
-test('explicit reset releases settled records and makes old command requests invalid', async () => {
+test('explicit reset releases settled records, carries active ones, and makes old command requests invalid', async () => {
   const f = fixture(65536, 1); const old = f.request('execute');
   await f.service.handle(old); await f.started();
-  expect(await f.service.handle(f.request('reset'))).toMatchObject({ status: 'reset_blocked' });
-  f.exit(); await f.finished();
-  expect(await f.service.handle(f.request('reset'))).toMatchObject({ status: 'reset' });
+  expect(await f.service.handle(f.request('reset'))).toMatchObject({ status: 'reset', carriedResults: 1 });
+  expect(await f.service.handle(old)).toMatchObject({ status: 'session_mismatch' });
+  f.exit(); expect(await f.finished()).toMatchObject({ exitCode: 7 });
+  expect(await f.service.handle(f.request('execute'))).toMatchObject({ state: 'finished' });
+  expect(await f.service.handle(f.request('reset'))).toMatchObject({ status: 'reset', carriedResults: 0 });
   expect(await f.service.handle(old)).toMatchObject({ status: 'session_mismatch' });
   expect(f.calls.filter(x => x === 'SpawnPty')).toHaveLength(1); f.service.close();
+});
+
+test('a full session releases its oldest fully read settled result and never runs a released ID again', async () => {
+  const f = fixture(65536, 2);
+  const run = async (id: string, count: number) => { await f.service.handle(f.request('execute', id)); await f.attached(count); f.exit(); await f.finished(id); };
+  await run('one', 1); await run('two', 2);
+  expect(await f.service.handle(f.request('execute', 'three'))).toMatchObject({ status: 'session_capacity' });
+  f.service.markDelivered('one', 1, 1, 0); f.service.markDelivered('two', 0, 0, 0); await run('three', 3);
+  expect(await f.service.handle(f.request('read', 'two'))).toMatchObject({ status: 'result_released', commandOutcome: 'ended', exitCode: 7 });
+  expect(await f.service.handle(f.request('execute', 'two'))).toMatchObject({ status: 'result_released' });
+  expect(await f.service.handle({ ...f.request('execute', 'two'), timeoutMs: 5000 })).toMatchObject({ status: 'command_id_conflict' });
+  expect(await f.service.handle(f.request('read', 'one'))).toMatchObject({ status: 'command', state: 'finished' });
+  expect(f.calls.filter(x => x === 'SpawnPty')).toHaveLength(3); f.service.close();
+});
+
+test('an unresolved cleanup result is never released, and only contiguous MCP pages to the end count as read', async () => {
+  const f = fixture(65536, 1), server = new McpServer({ name: 'fixture', version: '1' });
+  registerTerminalTools(server, PolicySchema.parse({ terminal: { agentId: 'bc-test', executeEnabled: true },
+    defaultProfile: 'terminal', profiles: { terminal: { tools: ['*'] } } }), '', f.service);
+  const client = new Client({ name: 'fixture-client', version: '1' });
+  const [ct, st] = InMemoryTransport.createLinkedPair(); await server.connect(st); await client.connect(ct);
+  try {
+    await client.callTool({ name: 'cursor_terminal_status', arguments: {} });
+    await f.service.handle(f.request('execute')); await f.started(); f.failCleanup();
+    await f.service.handle(f.request('cancel')); expect(await f.finished()).toMatchObject({ cleanup: 'termination_unconfirmed' });
+    f.service.markDelivered('one', 0, 0, 0);
+    expect(await f.service.handle(f.request('execute', 'two'))).toMatchObject({ status: 'session_capacity' });
+    f.recoverCleanup(); await f.service.handle(f.request('cancel'));
+    await f.service.handle(f.request('execute', 'two')); await f.attached(2);
+    f.data(Buffer.from('v'.repeat(3000))); f.exit(); await f.finished('two');
+    const args = { sessionId: f.service.sessionId, commandId: 'two' };
+    await client.callTool({ name: 'cursor_terminal_read', arguments: { ...args, outputOffset: 65536 } });
+    await client.callTool({ name: 'cursor_terminal_read', arguments: args });
+    await client.callTool({ name: 'cursor_terminal_read', arguments: { ...args, outputOffset: 2500 } });
+    expect(await f.service.handle(f.request('execute', 'three'))).toMatchObject({ status: 'session_capacity' });
+    await client.callTool({ name: 'cursor_terminal_read', arguments: { ...args, outputOffset: 2000 } });
+    expect(await f.service.handle(f.request('execute', 'three'))).toMatchObject({ state: 'starting' });
+  } finally { await client.close(); await server.close(); f.service.close(); }
 });
 
 function wakeFixture(before = 'gateway_unavailable', outcome: boolean | Error = true, changed = false, failFirstPoll = false) {
@@ -719,7 +759,7 @@ test('status/wake server timing includes admission while refusals and overview s
   const policy = PolicySchema.parse({ terminal: { targets: 'profile', executeEnabled: true }, deleteEnabled: true,
     defaultProfile: 'terminal', profiles: { terminal: { tools: ['*'] } } });
   const server = new McpServer({ name: 'fixture', version: '1' });
-  const backend = { async handle() { now += 7; return { status: 'ready' }; }, close() {} };
+  const backend = { async handle() { now += 7; return { status: 'ready' }; }, close() {}, markDelivered() {} };
   const scope = { async assert(id: string) { now += 15; if (id === 'bc-denied') throw new PolicyError('denied'); } };
   registerTerminalTools(server, policy, '', backend, scope);
   const client = new Client({ name: 'fixture-client', version: '1' });
