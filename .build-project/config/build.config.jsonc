@@ -1,7 +1,7 @@
 {
-  "$schema": "https://raw.githubusercontent.com/ebrindley/poetic/main/schemas/poetic.config.schema.json",
+  "$schema": "https://cdn.jsdelivr.net/npm/@ebrindley/build/schemas/build.config.schema.json",
 
-  // No project-level defaultProvider override: Poetic resolves the default
+  // No project-level defaultProvider override: Build resolves the default
   // from environment, user config, profiles, and the bundled provider registry.
 
   // AI provider configuration: providers are peers. Enable or disable entries
@@ -40,17 +40,11 @@
   // Telemetry Configuration — variant performance tracking (all data stored locally)
   "telemetry": {
     "enabled": true,
-    "database": ".poetic/telemetry/db/variants.db",
     // All telemetry stored locally — no data sent externally
   },
 
   // Variant Competition Settings — how competing variants are evaluated
   "variants": {
-    "strategies": {
-      "conservative": { "weight": 0.4 }, // Stability-focused
-      "innovative": { "weight": 0.3 },   // Cutting-edge approaches
-      "hybrid": { "weight": 0.3 },        // Balanced pragmatism
-    },
     // Maximum concurrent variant executions
     "maxConcurrent": 3,
   },
@@ -63,6 +57,6 @@
     "concurrencyMultiplier": 2,
 
     // Merge-time repair uses runtime defaults unless explicitly configured.
-    // Override via config or env: POETIC_BIOME_REPAIR_PROVIDER / POETIC_BIOME_REPAIR_MODEL
+    // Override via config or env: BUILD_BIOME_REPAIR_PROVIDER / BUILD_BIOME_REPAIR_MODEL
   },
 }

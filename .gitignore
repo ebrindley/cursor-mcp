@@ -11,7 +11,7 @@ policy.json
 .mcp-runtime/
 .claude/
 
-# Poetic work-item archives stay local; active items are tracked.
+# Build work-item archives stay local; active items are tracked.
 backlog/archive/
 task/archive/
 sprint/archive/
@@ -21,8 +21,8 @@ finding/archive/
 issue/archive/
 suppression/archive/
 
-# Shared Poetic configuration and active work items stay tracked.
-!.poetic/
-.poetic/backlog/archive/
-.poetic/task/archive/
-.poetic/sprint/archive/
+# Shared Build configuration and active work items stay tracked.
+!.build-project/
+.build-project/backlog/archive/
+.build-project/task/archive/
+.build-project/sprint/archive/

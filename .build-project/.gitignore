@@ -1,4 +1,4 @@
-# Poetic Artifacts
+# Build Artifacts
 # Generated files and runtime data - safe to ignore
 
 artifacts/
@@ -32,13 +32,28 @@ memory/
 provider-history/
 prompts/
 planning/indexes/
+analysis-synthesis/
+research/
+rate-limits/
+results/
+session/
+# Plan artifacts written by every planned build or `build plan` run; consumed by
+# `build plan approve`, never delivered. Anchored so authored `plans/` dirs elsewhere stay tracked.
+/plans/
+
+# Timestamped config backups written by `build config set`
+config/*.backup.*
 
 # Logs
 *.log
+/model-update.lock
+/sprint-*.lock
+planning/locks/
+*.md.lock
 *.jsonl
 # Intent context-injection telemetry (transient diagnostics: token usage,
 # selection metrics, timing). Written as `logs/injection/injection-<ts>.json`
-# by `poetic intent inject`; never durable, so keep it out of the tree.
+# by `build intent inject`; never durable, so keep it out of the tree.
 logs/injection/
 
 # Database files (SQLite + WAL)

@@ -47,7 +47,7 @@ For jobs that must outlive the local MCP process, use a caller-owned detached tm
 
 On 2026-09-16, probes observed an AttachPty WebSocket closing after approximately 60 seconds without frames in either direction (abnormal closure 1006) while the VM, PTY, and process remained healthy. While a streaming request is pending, Cursor MCP sends ListPtys on the same socket after 20 idle seconds to prevent this observed idle drop. Keepalive failures are ignored; this is not a connection-health check or a Cursor timing or availability guarantee. Keepalives do not extend command deadlines or preserve MCP-local handles and output across restart. Cleanup after an unrecoverable stream loss is unchanged.
 
-This server does not create or manage tmux sessions; the reasoning and the conditions for revisiting it are recorded in `.poetic/planning/tmux-durability-decision.md`.
+This server does not create or manage tmux sessions; the reasoning and the conditions for revisiting it are recorded in `.build-project/planning/tmux-durability-decision.md`.
 
 ## Interactive sessions
 

@@ -1,0 +1,29 @@
+# Task-type alias map (declared work-item terminology -> registry task-type id)
+#
+# OPT-IN. Ships EMPTY by design. Out of the box, NO declared term is mapped to a
+# canonical task-type id: a declared term (from `build plan backlog add --type <term>`
+# or `--work-type <term>`) still round-trips verbatim and resolves to the default
+# task type (`general`). Prose inference runs only for items with NO declared
+# term: a typed item is never re-typed from its text. This file is convenience,
+# never a dependency.
+#
+# Build's core stays methodology-agnostic: methodology terms (epic/story/spike/
+# chore/rock/...) are OPAQUE data here, never branched on in code. To opt in to a
+# methodology mapping, either add entries below or copy one preset file from
+# `.build-project/config/task-type-aliases.presets/` over this file and edit to taste.
+#
+# Format (either a flat map or an `aliases:` wrapper works):
+#
+#   aliases:
+#     epic: feature
+#     story: feature
+#     spike: analysis
+#     chore: general
+#
+# Mapped values MUST be real registry task-type ids (see `build task-type list`).
+# A mapped id that does not exist in the registry is ignored (the item resolves
+# to the default type); `build task-type` validation will warn about it.
+#
+# Declared terms are recorded and matched VERBATIM (no lowercasing / inference).
+#
+# (intentionally empty)
