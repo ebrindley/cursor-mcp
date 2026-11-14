@@ -31,6 +31,11 @@ const RESUMABLE = new Set(['stream_ended_without_exit', 'gateway_unavailable', '
   'gateway_send_failed', 'terminal_connection_failed']);
 /** One owned process at a time. A full session releases its oldest settled, fully read result; a released ID keeps a
  *  record so resending it is reported, never executed again. */
+const SUSPENDED_VM_DIAGNOSIS = {
+  diagnosis: 'vm_probably_suspended',
+  nextStep: 'The wake was acknowledged, but the terminal was still unavailable after the wait. The VM is probably suspended, which a wake does not resume. An agent run resumes it: use cursor_keep_awake, or cursor_create_run with a minimal prompt.',
+} as const;
+
 export class TerminalService {
   sessionId = randomUUID();
   private readonly results = new Map<string, Command>();
@@ -114,7 +119,9 @@ export class TerminalService {
           }
           try { await sleep(polling, 1000); } catch { break; }
         }
-        return { ...result, readiness: polling.stopReason() === 'deadline' ? 'deadline' : 'cancelled' };
+        if (polling.stopReason() !== 'deadline') return { ...result, readiness: 'cancelled' };
+        // An acknowledged wake that leaves the gateway unavailable matches a suspended VM, which a wake does not resume.
+        return { ...result, readiness: 'deadline', ...(result.wakeOutcome === 'signaled' ? SUSPENDED_VM_DIAGNOSIS : {}) };
       } finally { polling.dispose(); }
     } finally {
       lifetime.dispose(); signal?.removeEventListener('abort', cancelled); this.shutdown.signal.removeEventListener('abort', shutdown);

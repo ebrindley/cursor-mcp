@@ -11,7 +11,7 @@ export function terminalText(result: Record<string, unknown>): string {
     'maxTargets', 'retainedTargets', 'carriedResults', 'targetOffset', 'targetNextOffset', 'state', 'commandOutcome', 'exitCode', 'signal', 'reason', 'httpStatus', 'failedOperation', 'cleanup', 'outputComplete',
     'outputReadFailed', 'outputTruncated', 'outputOffset', 'outputNextOffset', 'outputLength',
     'outputStartOffset', 'outputEndOffset', 'outputGap', 'reconnectGapPossible', 'inputOutcome', 'nextInputSequence', 'remoteOutcome', 'bytes', 'maxBytes',
-    'wakeOutcome', 'readiness', 'failureStage', 'serverElapsedMs', 'machineChanged', 'reattachments', 'continuityUncertain', 'hint', 'output',
+    'wakeOutcome', 'readiness', 'diagnosis', 'nextStep', 'failureStage', 'serverElapsedMs', 'machineChanged', 'reattachments', 'continuityUncertain', 'hint', 'output',
   ].filter(key => Object.hasOwn(result, key)).map(key => [key, typeof result[key] === 'string' ? sanitize(result[key] as string) : result[key]]));
   // Sanitize fields before JSON escaping, just as the renderer did before fitting.
   return JSON.stringify(summary);

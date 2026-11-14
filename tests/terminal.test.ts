@@ -193,17 +193,20 @@ test('terminal tool finalization retains an acknowledged wake when an inherited 
     if (++connects === 1) return { machineId: 'original', peer: { async unary() { throw new TerminalFailure('gateway_unavailable'); }, async stream() {}, close() {} } };
     return new Promise(() => {});
   } });
-  const handlers = new Map<string, (args: Record<string, unknown>) => Promise<{ structuredContent?: unknown }>>();
+  const handlers = new Map<string, (args: Record<string, unknown>) => Promise<{ structuredContent?: unknown; content?: Array<{ text: string }> }>>();
   const server = {
     server: {},
-    registerTool(name: string, _config: unknown, handler: (args: Record<string, unknown>) => Promise<{ structuredContent?: unknown }>) { handlers.set(name, handler); },
+    registerTool(name: string, _config: unknown, handler: (args: Record<string, unknown>) => Promise<{ structuredContent?: unknown; content?: Array<{ text: string }> }>) { handlers.set(name, handler); },
   } as unknown as McpServer;
   registerTerminalTools(server, PolicySchema.parse({ terminal: { agentId: 'bc-test', executeEnabled: true },
     defaultProfile: 'terminal', profiles: { terminal: { tools: ['*'] } } }), '', supplied);
   try {
     const pending = withWaitScope(parent, () => handlers.get('cursor_terminal_wake')!({ waitMs: 60000 }));
     await vi.advanceTimersByTimeAsync(45000);
-    expect((await pending).structuredContent).toMatchObject({ status: 'wake', wakeOutcome: 'signaled', readiness: 'deadline' });
+    const finalized = await pending;
+    expect(finalized.structuredContent).toMatchObject({ status: 'wake', wakeOutcome: 'signaled', readiness: 'deadline', diagnosis: 'vm_probably_suspended' });
+    // Text-only clients see the same diagnosis and next step.
+    expect(finalized.content?.[0]?.text).toMatch(/vm_probably_suspended[\s\S]*cursor_keep_awake/);
   } finally { supplied.close(); parent.dispose(); vi.useRealTimers(); }
 });
 
@@ -786,6 +789,39 @@ test('status carries the failed Cursor operation and HTTP status beside the unch
     expect(plain).toMatchObject({ status: 'terminal_connection_failed' });
     expect(plain).not.toHaveProperty('httpStatus');
     expect(plain).not.toHaveProperty('failedOperation');
+  } finally { f.service.close(); }
+});
+
+test.each([
+  { name: 'signaled and still unavailable at the deadline', outcome: true, waitMs: 100, recovers: false, diagnosed: true },
+  { name: 'signaled and ready', outcome: true, waitMs: 5000, recovers: true, diagnosed: false },
+  { name: 'not signaled and still unavailable', outcome: false, waitMs: 100, recovers: false, diagnosed: false },
+  { name: 'signaled with readiness skipped', outcome: true, waitMs: 0, recovers: false, diagnosed: false },
+])('wake diagnosis for $name', async ({ outcome, waitMs, recovers, diagnosed }) => {
+  let connects = 0;
+  const wake = vi.fn(async () => outcome);
+  const service = new TerminalService('bc-test', { wake, async connect() {
+    const unavailable = ++connects === 1 || !recovers;
+    return { machineId: 'original', peer: { async unary() { if (unavailable) throw new TerminalFailure('gateway_unavailable'); return {}; }, async stream() {}, close() {} } };
+  } });
+  try {
+    const result = await service.handle({ operation: 'wake', waitMs });
+    expect(result).toMatchObject({ wakeOutcome: outcome ? 'signaled' : 'not_signaled', readiness: waitMs === 0 ? 'skipped' : recovers ? 'ready' : 'deadline' });
+    if (diagnosed) {
+      expect(result).toMatchObject({ diagnosis: 'vm_probably_suspended', nextStep: expect.stringMatching(/probably suspended.*cursor_keep_awake.*cursor_create_run/s) });
+    } else {
+      expect(result).not.toHaveProperty('diagnosis'); expect(result).not.toHaveProperty('nextStep');
+    }
+    expect(wake).toHaveBeenCalledOnce();
+  } finally { service.close(); }
+});
+
+test('already-ready wake carries no diagnosis', async () => {
+  const f = wakeFixture('ready');
+  try {
+    const result = await f.service.handle({ operation: 'wake' });
+    expect(result).toMatchObject({ status: 'already_ready' });
+    expect(result).not.toHaveProperty('diagnosis'); expect(result).not.toHaveProperty('nextStep');
   } finally { f.service.close(); }
 });
 

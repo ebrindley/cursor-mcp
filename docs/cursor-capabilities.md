@@ -154,8 +154,12 @@ permissions. Use terminal status to check access to the selected VM.
 
 A stopped agent run does not necessarily mean its VM is unavailable. Use terminal
 status to check access and explicit wake to request recovery when appropriate.
-Wake does not start an agent run or guarantee that a machine or its processes
-survived. Run status, API throttling, model usage limits, and VM availability are
+Wake restores a dropped terminal connection on a VM that is still running. It
+does not resume a suspended VM, even when Cursor acknowledges it; an agent run
+does (`cursor_keep_awake`, or `cursor_create_run` with a minimal prompt). When an
+acknowledged wake leaves the terminal unavailable, the result says the VM is
+probably suspended and names that next step. Wake does not start an agent run or
+guarantee that a machine or its processes survived. Run status, API throttling, model usage limits, and VM availability are
 separate conditions.
 
 Output retention is bounded. Interactive sessions can reconnect within the same
