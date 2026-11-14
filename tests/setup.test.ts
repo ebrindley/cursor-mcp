@@ -26,7 +26,7 @@ describe("human setup", () => {
     await setup("ExampleOrg/ExampleRepo", path);
     const policy = await loadPolicy(path, true);
     expect(policy.profiles[policy.defaultProfile!]!.repos).toEqual(["https://github.com/ExampleOrg/ExampleRepo"]);
-    expect(policy.profiles[policy.defaultProfile!]!.tools).toHaveLength(14);
+    expect(policy.profiles[policy.defaultProfile!]!.tools).toHaveLength(15);
     expect(policy.profiles[policy.defaultProfile!]!.tools).not.toContain("read:*");
     expect(policy.profiles[policy.defaultProfile!]!.allowNoRepository).toBe(false);
     expect((await stat(path)).mode & 0o777).toBe(0o600);

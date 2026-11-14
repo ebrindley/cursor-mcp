@@ -43,6 +43,7 @@ const EXPECTED_TOOLS = [
   "cursor_get_artifact_url",
   "cursor_create_agent",
   "cursor_create_run",
+  "cursor_keep_awake",
   "cursor_cancel_run",
   "cursor_archive_agent",
   "cursor_unarchive_agent",
