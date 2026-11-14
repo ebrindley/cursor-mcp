@@ -19,6 +19,7 @@
         "read:*",
         "cursor_create_agent",
         "cursor_create_run",
+        "cursor_keep_awake",
         "cursor_cancel_run"
       ],
       "autoCreatePR": false
@@ -30,6 +31,7 @@
         "read:*",
         "cursor_create_agent",
         "cursor_create_run",
+        "cursor_keep_awake",
         "cursor_cancel_run"
       ],
       "autoCreatePR": false

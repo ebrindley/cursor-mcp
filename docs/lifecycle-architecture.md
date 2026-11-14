@@ -97,6 +97,7 @@ Existing tools keep their names. New tools follow `cursor_<verb>_<resource>`.
 | Launch (repository) | `cursor_create_agent` | API-key `observed`. One or multiple repositories; exact target and source-pin readback are reported. |
 | Launch (named environment) | `cursor_create_agent` | API-key `documented`, implemented. Same tool, mutually exclusive target arguments, both allowlists. |
 | Follow up | `cursor_create_run` | API-key `observed`. |
+| Keep awake | `cursor_keep_awake` | One follow-up run with a fixed minimal prompt through the `cursor_create_run` path, then a terminal status read. Scheduling is the caller's. |
 | Cancel run | `cursor_cancel_run` | API-key `observed`. A request, not a stop. Never a Build cancel. |
 | Archive / unarchive | `cursor_archive_agent`, `cursor_unarchive_agent` | API-key `observed`. List hygiene only. |
 | Delete | `cursor_delete_agent` | API-key `documented`. Second gate: `deleteEnabled`. |

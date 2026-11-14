@@ -5,7 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { PolicySchema } from '../src/config.js';
 import { TerminalService } from '../src/terminal.js';
 import { CursorTerminalConnector, TerminalFailure, TerminalGateway, type TerminalConnector, type TerminalPeer } from '../src/terminal-gateway.js';
-import { registerTerminalTools } from '../src/tools/terminal.js';
+import { registerTerminalTools, type TerminalStatusProbe } from '../src/tools/terminal.js';
 import { PolicyError } from '../src/errors.js';
 import { fail } from '../src/tools/result.js';
 import { createWaitScope } from '../src/wait.js';
@@ -886,4 +886,18 @@ test('execute and session_create descriptions name the detached-job recipe and t
     expect(description('cursor_terminal_execute')).toContain("For jobs exceeding timeoutMs or needing recoverable results after MCP restart, use caller-owned detached tmux with output and the workload's exit status in VM files, polled by short commands.");
     expect(description('cursor_terminal_session_create')).toContain('No command deadline; handles and retained output are lost on MCP restart, while the shell may keep running.');
   } finally { await client.close(); await server.close(); }
+});
+
+test('status probe is offered only when cursor_terminal_status is registered and reads the backend status', async () => {
+  const backend = { async handle(request: { operation: string }) { return { status: request.operation === 'status' ? 'ready' : 'other' }; }, close() {}, markDelivered() {} };
+  const registerWith = (tools: string[], terminal: boolean) => {
+    const server = new McpServer({ name: 'fixture', version: '1' });
+    const probe: TerminalStatusProbe = {};
+    registerTerminalTools(server, PolicySchema.parse({ ...(terminal ? { terminal: { agentId: 'bc-test' } } : {}),
+      defaultProfile: 'terminal', profiles: { terminal: { tools } } }), '', backend as never, undefined, probe);
+    return probe;
+  };
+  expect(await registerWith(['cursor_terminal_status'], true).status?.('bc-test')).toBe('ready');
+  expect(registerWith(['cursor_terminal_read'], true).status).toBeUndefined();
+  expect(registerWith(['cursor_terminal_status'], false).status).toBeUndefined();
 });

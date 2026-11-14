@@ -27,16 +27,19 @@ import { registerEnvironmentOperationTools } from "./tools/environment-operation
 import { registerLifecycleTools } from "./tools/lifecycle.js";
 import { registerRunActivityTool } from "./tools/run-activity.js";
 import { registerRunExportTool } from "./tools/run-export.js";
-import { registerTerminalTools } from "./tools/terminal.js";
+import { registerTerminalTools, type TerminalStatusProbe } from "./tools/terminal.js";
 import { VERSION } from "./version.js";
 
 export function registerTools(server: McpServer, client: CursorClient, policy: Awaited<ReturnType<typeof loadPolicy>>, scope: AgentScope, apiKey: string): string[] {
+  // Filled by the terminal tools and read by cursor_keep_awake, so the one
+  // terminal status read is shared and the terminal policy gates apply to it.
+  const terminalProbe: TerminalStatusProbe = {};
   return [
-    ...registerTerminalTools(server, policy, apiKey, undefined, scope),
+    ...registerTerminalTools(server, policy, apiKey, undefined, scope, terminalProbe),
     // Workspace Controls: identity, models, repositories, and the settings
     // catalog. Unproven controls stay addressable as capability results.
     ...registerAccountTools(server, client, policy),
-    ...registerAgentTools(server, client, policy, scope),
+    ...registerAgentTools(server, client, policy, scope, undefined, terminalProbe),
     ...registerRunActivityTool(server, client, policy, scope),
     // Disk-bound replay export. Registered only when an operator has both granted
     // the tool and configured a storage root, because it is the one tool that

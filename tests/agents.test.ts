@@ -32,6 +32,7 @@ import {
 } from "../src/policy.js";
 import { registerArtifactTools } from "../src/tools/artifacts.js";
 import { registerAgentTools } from "../src/tools/agents.js";
+import type { TerminalStatusProbe } from "../src/tools/terminal.js";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
@@ -3889,5 +3890,207 @@ describe("prompt images", () => {
       if (previous === undefined) delete process.env.CURSOR_MCP_LOG_LEVEL;
       else process.env.CURSOR_MCP_LOG_LEVEL = previous;
     }
+  });
+});
+
+describe("cursor_keep_awake", () => {
+  const run = (status: string) => ({
+    id: "run-1",
+    agentId: "bc-1",
+    status,
+    createdAt: "t",
+    updatedAt: "t",
+  });
+  const usagePayload = (cost?: { rawCostCents?: number }) => ({
+    totalUsage: { totalTokens: 99, inputTokens: 9, outputTokens: 9, cacheReadTokens: 9, cacheWriteTokens: 9 },
+    runs: [
+      {
+        id: "run-1",
+        usage: { totalTokens: 25, inputTokens: 5, outputTokens: 7, cacheReadTokens: 11, cacheWriteTokens: 2 },
+        ...(cost === undefined ? {} : { cost }),
+      },
+    ],
+  });
+  const posts = () => fetchImpl.mock.calls.filter(([, init]) => init?.method === "POST");
+  const urls = () => fetchImpl.mock.calls.map(([input]) => String(input));
+
+  /** Routes the fake API: one POST answer, then the run's and usage's GETs. */
+  const api = (opts: {
+    post?: () => Response;
+    runStatus?: string;
+    usage?: () => Response;
+  }) =>
+    fetchImpl.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (init?.method === "POST") return opts.post?.() ?? json({ run: run("CREATING") });
+      if (url.includes("/usage")) return opts.usage?.() ?? json(usagePayload({ rawCostCents: 3 }));
+      return json(run(opts.runStatus ?? "FINISHED"));
+    });
+
+  async function connectKeepAwake(p: Policy, probe?: TerminalStatusProbe) {
+    const server = new McpServer({ name: "cursor-mcp", version: "test" });
+    const cursor = new CursorClient({
+      apiKey: "sk-test",
+      baseUrl: "https://api.example.test",
+      fetchImpl,
+      sleepImpl: async () => {},
+    });
+    registerAgentTools(server, cursor, p, new AgentScope(cursor, undefined), undefined, probe);
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test", version: "test" });
+    await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
+    return client;
+  }
+  const keepAwake = (client: Client, args: Record<string, unknown> = {}) =>
+    client.callTool({ name: "cursor_keep_awake", arguments: { agentId: "bc-1", waitMs: 0, ...args } });
+  const ready: TerminalStatusProbe = { status: async () => "ready" };
+
+  it("sends one fixed agent-mode prompt and reports a finished run, terminal and usage", async () => {
+    api({});
+    const probed: string[] = [];
+    const client = await connectKeepAwake(policy(["cursor_keep_awake"]), {
+      status: async (agentId) => { probed.push(agentId); return "ready"; },
+    });
+    const result = await keepAwake(client);
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toEqual({
+      agentId: "bc-1",
+      outcome: "run_finished",
+      runId: "run-1",
+      runStatus: "FINISHED",
+      terminal: "ready",
+      usage: {
+        inputTokens: 5,
+        outputTokens: 7,
+        cacheReadTokens: 11,
+        cacheWriteTokens: 2,
+        totalTokens: 25,
+        rawCostCents: 3,
+      },
+    });
+    expect(JSON.parse(text(result).split("\n").find((line) => line.startsWith("{"))!)).toEqual(result.structuredContent);
+    expect(posts()).toHaveLength(1);
+    expect(urls()[0]).toBe("https://api.example.test/v1/agents/bc-1/runs");
+    expect(JSON.parse(String(posts()[0]![1]!.body))).toEqual({
+      prompt: { text: "Reply exactly: READY" },
+      mode: "agent",
+    });
+    expect(urls().find((u) => u.includes("/usage"))).toContain("runId=run-1");
+    expect(probed).toEqual(["bc-1"]);
+  });
+
+  it("reports run_pending without waiting, and reads no usage for an unfinished run", async () => {
+    api({ runStatus: "RUNNING" });
+    const client = await connectKeepAwake(policy(["cursor_keep_awake"]), ready);
+    const result = await keepAwake(client);
+    expect(result.structuredContent).toEqual({
+      agentId: "bc-1",
+      outcome: "run_pending",
+      runId: "run-1",
+      runStatus: "RUNNING",
+      terminal: "ready",
+      usage: null,
+    });
+    expect(urls().some((u) => u.includes("/usage"))).toBe(false);
+  });
+
+  it("reports run_failed for a terminal status other than finished", async () => {
+    api({ runStatus: "ERROR" });
+    const client = await connectKeepAwake(policy(["cursor_keep_awake"]), ready);
+    const result = await keepAwake(client);
+    expect(result.structuredContent).toMatchObject({
+      outcome: "run_failed",
+      runId: "run-1",
+      runStatus: "ERROR",
+      usage: null,
+    });
+  });
+
+  it("reports already_active on 409 agent_busy, creates nothing more and still probes", async () => {
+    api({ post: () => json({ error: { code: "agent_busy", message: "Agent has an active run" } }, 409) });
+    const client = await connectKeepAwake(policy(["cursor_keep_awake"]), { status: async () => "gateway_unavailable" });
+    const result = await keepAwake(client, { waitMs: 30_000 });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toEqual({
+      agentId: "bc-1",
+      outcome: "already_active",
+      runId: null,
+      runStatus: null,
+      terminal: "gateway_unavailable",
+      usage: null,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(posts()).toHaveLength(1);
+  });
+
+  it("reports agent_archived on 409 agent_archived and says unarchiving is required", async () => {
+    api({ post: () => json({ error: { code: "agent_archived", message: "Agent is archived" } }, 409) });
+    const client = await connectKeepAwake(policy(["cursor_keep_awake"]), ready);
+    const result = await keepAwake(client);
+    expect(result.structuredContent).toMatchObject({ outcome: "agent_archived", runId: null, runStatus: null });
+    expect(text(result)).toContain("unarchive");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces any other creation error unchanged and never retries it", async () => {
+    api({ post: () => json({ error: { code: "forbidden", message: "no" } }, 403) });
+    const client = await connectKeepAwake(policy(["cursor_keep_awake"]), ready);
+    const result = await keepAwake(client);
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("403");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports null terminal and usage when neither is available, without failing", async () => {
+    api({ usage: () => json({ error: { message: "down" } }, 404) });
+    const client = await connectKeepAwake(policy(["cursor_keep_awake"]));
+    const result = await keepAwake(client);
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ outcome: "run_finished", terminal: null, usage: null });
+  });
+
+  it("keeps rawCostCents null when Cursor returns no cost", async () => {
+    api({ usage: () => json(usagePayload()) });
+    const client = await connectKeepAwake(policy(["cursor_keep_awake"]), ready);
+    const result = await keepAwake(client);
+    expect(result.structuredContent).toMatchObject({ usage: { totalTokens: 25, rawCostCents: null } });
+  });
+
+  it("is withheld under read:* and registered as a paid write", async () => {
+    const readOnly = await connectKeepAwake(policy(["read:*"]));
+    expect((await readOnly.listTools()).tools.map((t) => t.name)).not.toContain("cursor_keep_awake");
+    const client = await connectKeepAwake(policy(["cursor_keep_awake"]));
+    const tool = (await client.listTools()).tools.find((t) => t.name === "cursor_keep_awake");
+    expect(tool?.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, idempotentHint: false });
+    expect(JSON.stringify(tool?.inputSchema)).toContain("\"maximum\":45000");
+    // The read-only call is refused by the profile before any request is made.
+    expect(await readOnly.callTool({ name: "cursor_keep_awake", arguments: { agentId: "bc-1" } }).then((r) => r.isError)).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("applies the repository scope and the model pin that cursor_create_run applies", async () => {
+    const pinned = policy(["cursor_keep_awake"]);
+    pinned.profiles.p!.model = "grok-4.6";
+    api({});
+    const client = await connectKeepAwake(pinned);
+    await keepAwake(client);
+    expect(JSON.parse(String(posts()[0]![1]!.body))).toMatchObject({ model: { id: "grok-4.6" }, mode: "agent" });
+
+    fetchImpl.mockReset();
+    fetchImpl.mockResolvedValue(json({
+      id: "bc-1", status: "ACTIVE", url: "u", createdAt: "t", updatedAt: "t",
+      repos: [{ url: "https://github.com/someone/else" }],
+    }));
+    const server = new McpServer({ name: "cursor-mcp", version: "test" });
+    const cursor = new CursorClient({ apiKey: "sk-test", baseUrl: "https://api.example.test", fetchImpl, sleepImpl: async () => {} });
+    const scoped = policy(["cursor_keep_awake"], ["ExampleOrg/ExampleRepo"]);
+    registerAgentTools(server, cursor, scoped, new AgentScope(cursor, activeProfile(scoped)));
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    const other = new Client({ name: "test", version: "test" });
+    await Promise.all([server.connect(serverSide), other.connect(clientSide)]);
+    const denied = await keepAwake(other);
+    expect(denied.isError).toBe(true);
+    expect(text(denied)).toContain("Refused by policy");
+    expect(posts()).toHaveLength(0);
   });
 });

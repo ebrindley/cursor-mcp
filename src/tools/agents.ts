@@ -82,6 +82,7 @@ import { capBytes, sanitize } from "../untrusted.js";
 import { CANCEL, CREATE, READ } from "./annotations.js";
 import { defineTool } from "./register.js";
 import { ok, structuredCost, type FencedField } from "./result.js";
+import type { TerminalStatusProbe } from "./terminal.js";
 
 const FollowUpSchema = z.enum(["accepted", "refused", "unknown"]);
 
@@ -190,6 +191,16 @@ const CLIENT_AGENT_ID = new RegExp(
 export const DEFAULT_RUN_WAIT_MS = 30_000;
 export const MAX_RUN_WAIT_MS = 45_000;
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
+
+/**
+ * The one prompt `cursor_keep_awake` sends. Fixed, so the run is as small as an
+ * agent run can be and the caller has no prompt to get wrong.
+ */
+const KEEP_AWAKE_PROMPT = "Reply exactly: READY";
+/** Time past `waitMs` the tool may spend on creation, the terminal probe and the usage read. */
+const KEEP_AWAKE_TAIL_MS = 45_000;
+const KEEP_AWAKE_PROBE_MS = 20_000;
+const KEEP_AWAKE_USAGE_MS = 10_000;
 
 /**
  * Detail reads one `cursor_list_agents` call may spend resolving thin summaries.
@@ -325,6 +336,7 @@ export function registerAgentTools(
   policy: Policy,
   scope = new AgentScope(client, activeProfile(policy)),
   hooks: AgentToolHooks = REAL_TIME,
+  terminalProbe?: TerminalStatusProbe,
 ): string[] {
   const profile = activeProfile(policy);
   const registered: string[] = [];
@@ -336,6 +348,125 @@ export function registerAgentTools(
     spec: ToolSpec<C, A>,
   ) => {
     if (defineTool(server, policy, profile, spec)) registered.push(spec.name);
+  };
+
+  /**
+   * Poll one run until it is terminal or `waitMs` elapses. Shared by
+   * `cursor_wait_run` and `cursor_keep_awake`; the bound covers the scope lookup,
+   * every GET and every sleep.
+   */
+  const pollRun = async (args: {
+    agentId: string;
+    runId: string;
+    waitMs: number;
+    interval: number;
+    assertScope: boolean;
+  }): Promise<{ run: Run; timedOut: boolean; polls: number; elapsedMs: number; path: string }> => {
+    const { waitMs, interval } = args;
+    const path = `/v1/agents/${seg(args.agentId)}/runs/${seg(args.runId)}`;
+    // One wall-clock bound over everything this call does: the scope lookup,
+    // every GET, and every sleep. A slow upstream cannot stretch a 45 s wait
+    // into a client timeout, which the model would read as failure.
+    const started = hooks.now();
+    const observation = requestScope(waitMs === 0 ? MAX_RUN_WAIT_MS : waitMs);
+    const signal = observation.signal;
+    const boundHit = () => observation.stopReason() === "deadline";
+    // One notification per completed poll, when the client asked for them. The
+    // poll interval is at least a second, so the cadence needs no extra gate,
+    // and the run's own status stays out of the message: it is Cursor's text,
+    // and the tool result is where it belongs.
+    const progress = currentRequestProgress();
+    let last: Run | undefined;
+    let polls = 0;
+    const finish = (run: Run, timedOut: boolean) => ({
+      run,
+      timedOut,
+      polls,
+      elapsedMs: Math.round(hooks.now() - started),
+      path,
+    });
+    try { return await withWaitScope(observation, async () => {
+      // Under the same bound as the polls: an uncached scope lookup must not
+      // run to the client's own deadline. Aborted here there is no state to
+      // answer with, so the cancellation error propagates.
+      if (args.assertScope) await within(observation, () => scope.assert(args.agentId, { signal }));
+      for (;;) {
+        let run: Run;
+        try {
+          run = await within(observation, () => client.get(path, RunSchema, { signal }));
+        } catch (error) {
+          // Our own deadline, not the caller's: answer with the last state
+          // seen rather than an error the model would read as failure.
+          if (boundHit() && last !== undefined) return finish(last, true);
+          throw error;
+        }
+        last = run;
+        polls += 1;
+        if (isTerminal(run.status)) return finish(run, false);
+        // The next poll would land at or past the bound, so stop here.
+        if (hooks.now() - started + interval >= waitMs) return finish(run, true);
+        // Reported only once this call has decided to keep waiting: a poll that
+        // returns the result immediately needs no notification about it.
+        progress?.report(
+          `waiting for a terminal run status: ${polls} poll${polls === 1 ? "" : "s"}, ` +
+            `${Math.round((hooks.now() - started) / 1000)}s of ${Math.round(waitMs / 1000)}s elapsed`,
+        );
+        try {
+          if (hooks === REAL_TIME) await boundedSleep(observation, interval);
+          else await within(observation, () => hooks.sleep(interval));
+        } catch (error) {
+          if (boundHit()) return finish(run, true);
+          throw error;
+        }
+      }
+    }); } catch (error) {
+      if (error instanceof WaitStoppedError) {
+        const detail = error.reason === "deadline" ? "reached its deadline before a run status was observed" : error.reason === "shutdown" ? "stopped because the server shut down" : "was cancelled by the caller";
+        const message = `Run observation ${detail}; the cloud run was not cancelled. Use cursor_get_run with the same ids to inspect it.`;
+        throw error.reason === "deadline" ? new CursorTransportError(message) : new CursorCancelledError(message);
+      }
+      throw error;
+    } finally { observation.dispose(); }
+  };
+
+  /** One usage read, optionally scoped to a run. Shared by `cursor_get_usage` and `cursor_keep_awake`. */
+  const readUsage = async (agentId: string, runId?: string) => {
+    const path = `/v1/agents/${seg(agentId)}/usage`;
+    const payload = await client.get(path, UsageSchema, { query: { runId } });
+    return { path, payload };
+  };
+
+  /**
+   * Create one run: model pin, image handling, scope check and usage guidance.
+   * Shared by `cursor_create_run` and `cursor_keep_awake`, so both go through the
+   * same request and the same policy checks.
+   */
+  const createRun = async (args: {
+    agentId: string;
+    prompt: string;
+    images?: PromptImageInput[];
+    model?: ModelInput;
+    mode?: "agent" | "plan";
+  }) => {
+    const model = resolveModel(profile, args.model);
+    const images = await promptImages(args.images);
+    await scope.assert(args.agentId);
+    const send = <T>(call: () => Promise<T>) => (images === undefined ? call() : images.shield(call));
+    const created = await withUsageGuidance(() => send(() =>
+      client.post(
+        `/v1/agents/${seg(args.agentId)}/runs`,
+        CreateRunResponseSchema,
+        {
+          body: {
+            prompt: { text: args.prompt, ...(images === undefined ? {} : { images: images.wire }) },
+            ...(model === undefined ? {} : { model: modelSelection(model) }),
+            ...(args.mode === undefined ? {} : { mode: args.mode }),
+          },
+        },
+      ),
+    ));
+    createdRuns.add(runKey(args.agentId, created.run.id));
+    return { created, model, images };
   };
 
   define({
@@ -916,80 +1047,26 @@ export function registerAgentTools(
       pollIntervalMs?: number;
     }) => {
       const waitMs = Math.min(args.waitMs ?? DEFAULT_RUN_WAIT_MS, MAX_RUN_WAIT_MS);
-      const interval = args.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-      const path = `/v1/agents/${seg(args.agentId)}/runs/${seg(args.runId)}`;
-      // One wall-clock bound over everything this call does: the scope lookup,
-      // every GET, and every sleep. A slow upstream cannot stretch a 45 s wait
-      // into a client timeout, which the model would read as failure.
-      const started = hooks.now();
-      const observation = requestScope(waitMs === 0 ? MAX_RUN_WAIT_MS : waitMs);
-      const signal = observation.signal;
-      const boundHit = () => observation.stopReason() === "deadline";
-      // One notification per completed poll, when the client asked for them. The
-      // poll interval is at least a second, so the cadence needs no extra gate,
-      // and the run's own status stays out of the message: it is Cursor's text,
-      // and the tool result is where it belongs.
-      const progress = currentRequestProgress();
-      let last: Run | undefined;
-      let polls = 0;
-      const finish = (run: Run, timedOut: boolean) => {
-        const elapsedMs = Math.round(hooks.now() - started);
-        const source = `GET ${path} (polled ${polls}x)`;
-        return ok({
-          source,
-          text: [
-            runText(run),
-            timedOut
-              ? `still ${run.status} after ${elapsedMs}ms; call cursor_wait_run again with the same ids`
-              : `terminal after ${elapsedMs}ms`,
-          ].join("\n"),
-          structured: { ...runStructured(run), timedOut, polls, elapsedMs },
-          fenced: runReply(source, run),
-          policy,
-        });
-      };
-      try { return await withWaitScope(observation, async () => {
-        // Under the same bound as the polls: an uncached scope lookup must not
-        // run to the client's own deadline. Aborted here there is no state to
-        // answer with, so the cancellation error propagates.
-        await within(observation, () => scope.assert(args.agentId, { signal }));
-        for (;;) {
-          let run: Run;
-          try {
-            run = await within(observation, () => client.get(path, RunSchema, { signal }));
-          } catch (error) {
-            // Our own deadline, not the caller's: answer with the last state
-            // seen rather than an error the model would read as failure.
-            if (boundHit() && last !== undefined) return finish(last, true);
-            throw error;
-          }
-          last = run;
-          polls += 1;
-          if (isTerminal(run.status)) return finish(run, false);
-          // The next poll would land at or past the bound, so stop here.
-          if (hooks.now() - started + interval >= waitMs) return finish(run, true);
-          // Reported only once this call has decided to keep waiting: a poll that
-          // returns the result immediately needs no notification about it.
-          progress?.report(
-            `waiting for a terminal run status: ${polls} poll${polls === 1 ? "" : "s"}, ` +
-              `${Math.round((hooks.now() - started) / 1000)}s of ${Math.round(waitMs / 1000)}s elapsed`,
-          );
-          try {
-            if (hooks === REAL_TIME) await boundedSleep(observation, interval);
-            else await within(observation, () => hooks.sleep(interval));
-          } catch (error) {
-            if (boundHit()) return finish(run, true);
-            throw error;
-          }
-        }
-      }); } catch (error) {
-        if (error instanceof WaitStoppedError) {
-          const detail = error.reason === "deadline" ? "reached its deadline before a run status was observed" : error.reason === "shutdown" ? "stopped because the server shut down" : "was cancelled by the caller";
-          const message = `Run observation ${detail}; the cloud run was not cancelled. Use cursor_get_run with the same ids to inspect it.`;
-          throw error.reason === "deadline" ? new CursorTransportError(message) : new CursorCancelledError(message);
-        }
-        throw error;
-      } finally { observation.dispose(); }
+      const { run, timedOut, polls, elapsedMs, path } = await pollRun({
+        agentId: args.agentId,
+        runId: args.runId,
+        waitMs,
+        interval: args.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+        assertScope: true,
+      });
+      const source = `GET ${path} (polled ${polls}x)`;
+      return ok({
+        source,
+        text: [
+          runText(run),
+          timedOut
+            ? `still ${run.status} after ${elapsedMs}ms; call cursor_wait_run again with the same ids`
+            : `terminal after ${elapsedMs}ms`,
+        ].join("\n"),
+        structured: { ...runStructured(run), timedOut, polls, elapsedMs },
+        fenced: runReply(source, run),
+        policy,
+      });
     },
   });
 
@@ -1023,10 +1100,7 @@ export function registerAgentTools(
     },
     handler: async (args: { agentId: string; runId?: string; detail?: boolean }) => {
       await scope.assert(args.agentId);
-      const path = `/v1/agents/${seg(args.agentId)}/usage`;
-      const payload = await client.get(path, UsageSchema, {
-        query: { runId: args.runId },
-      });
+      const { path, payload } = await readUsage(args.agentId, args.runId);
       // Keep the default compact. Detailed token counts support weighted cost
       // reconciliation; raw and charged costs remain distinct and optional.
       return ok({
@@ -1378,24 +1452,7 @@ export function registerAgentTools(
       model?: ModelInput;
       mode?: "agent" | "plan";
     }) => {
-      const model = resolveModel(profile, args.model);
-      const images = await promptImages(args.images);
-      await scope.assert(args.agentId);
-      const send = <T>(call: () => Promise<T>) => (images === undefined ? call() : images.shield(call));
-      const created = await withUsageGuidance(() => send(() =>
-        client.post(
-          `/v1/agents/${seg(args.agentId)}/runs`,
-          CreateRunResponseSchema,
-          {
-            body: {
-              prompt: { text: args.prompt, ...(images === undefined ? {} : { images: images.wire }) },
-              ...(model === undefined ? {} : { model: modelSelection(model) }),
-              ...(args.mode === undefined ? {} : { mode: args.mode }),
-            },
-          },
-        ),
-      ));
-      createdRuns.add(runKey(args.agentId, created.run.id));
+      const { created, model, images } = await createRun(args);
       return ok({
         source: `POST /v1/agents/${args.agentId}/runs`,
         text: `run=${created.run.id} status=${created.run.status}${images === undefined ? "" : ` images=${images.count}`}`,
@@ -1405,6 +1462,149 @@ export function registerAgentTools(
           ...(model === undefined ? {} : { modelRequested: model }),
           ...(images === undefined ? {} : { imageCount: images.count }),
         },
+        policy,
+      });
+    },
+  });
+
+  define({
+    name: "cursor_keep_awake",
+    waitBudgetMs: (args: { waitMs?: number }) => (args.waitMs ?? DEFAULT_RUN_WAIT_MS) + KEEP_AWAKE_TAIL_MS,
+    config: {
+      title: "Cursor Cloud: keep awake",
+      description:
+        "Send one minimal agent run to keep an agent's VM up or bring a suspended one back; reports terminal status. Starts paid agent work; scheduling is the caller's.",
+      inputSchema: {
+        agentId: AgentId,
+        waitMs: z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_RUN_WAIT_MS)
+          .optional()
+          .describe(`Upper bound on waiting for the run (default ${DEFAULT_RUN_WAIT_MS / 1000}s, maximum ${MAX_RUN_WAIT_MS / 1000}s; 0 does not wait).`),
+      },
+      outputSchema: {
+        agentId: z.string(),
+        outcome: z.enum(["run_finished", "run_pending", "run_failed", "already_active", "agent_archived"]),
+        runId: z.string().nullable(),
+        runStatus: z.string().nullable(),
+        terminal: z.string().nullable(),
+        usage: z
+          .object({
+            inputTokens: z.number(),
+            outputTokens: z.number(),
+            cacheReadTokens: z.number(),
+            cacheWriteTokens: z.number(),
+            totalTokens: z.number(),
+            rawCostCents: z.number().nullable(),
+          })
+          .nullable(),
+      },
+      annotations: CREATE,
+    },
+    handler: async (args: { agentId: string; waitMs?: number }) => {
+      const waitMs = Math.min(args.waitMs ?? DEFAULT_RUN_WAIT_MS, MAX_RUN_WAIT_MS);
+      // The same path, model pin and policy checks as `cursor_create_run`, once.
+      // Nothing here retries it: a refusal below is an answer, not a failure.
+      let created: Awaited<ReturnType<typeof createRun>>["created"] | undefined;
+      let refusal: "already_active" | "agent_archived" | undefined;
+      try {
+        ({ created } = await createRun({ agentId: args.agentId, prompt: KEEP_AWAKE_PROMPT, mode: "agent" }));
+      } catch (error) {
+        if (error instanceof CursorApiError && error.status === 409 && error.code === "agent_busy") {
+          refusal = "already_active";
+        } else if (error instanceof CursorApiError && error.status === 409 && error.code === "agent_archived") {
+          refusal = "agent_archived";
+        } else {
+          throw error;
+        }
+      }
+
+      let run: Run | undefined = created?.run;
+      let outcome: "run_finished" | "run_pending" | "run_failed" | "already_active" | "agent_archived" =
+        refusal ?? "run_pending";
+      if (created !== undefined) {
+        try {
+          const polled = await pollRun({
+            agentId: args.agentId,
+            runId: created.run.id,
+            waitMs,
+            interval: DEFAULT_POLL_INTERVAL_MS,
+            assertScope: false,
+          });
+          run = polled.run;
+        } catch (error) {
+          // The run exists, so its id must reach the caller. A caller who cancelled
+          // is not waiting for an answer.
+          if (error instanceof CursorCancelledError) throw error;
+        }
+        if (run !== undefined && isTerminal(run.status)) {
+          outcome = run.status === "FINISHED" ? "run_finished" : "run_failed";
+        }
+      }
+
+      // Read-only follow-ups. Neither may discard a run that was already created.
+      const bounded = async <T>(ms: number, read: () => Promise<T>): Promise<T | undefined> => {
+        const stage = requestScope(ms);
+        try {
+          return await withWaitScope(stage, () => within(stage, read));
+        } catch (error) {
+          if (error instanceof CursorCancelledError || currentRequestSignal()?.aborted === true) throw error;
+          return undefined;
+        } finally {
+          stage.dispose();
+        }
+      };
+      const probe = terminalProbe?.status;
+      const terminal = probe === undefined ? undefined : await bounded(KEEP_AWAKE_PROBE_MS, () => probe(args.agentId));
+
+      let usage: {
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens: number;
+        cacheWriteTokens: number;
+        totalTokens: number;
+        rawCostCents: number | null;
+      } | null = null;
+      if (outcome === "run_finished" && run !== undefined) {
+        const runId = run.id;
+        const read = await bounded(KEEP_AWAKE_USAGE_MS, () => readUsage(args.agentId, runId));
+        if (read !== undefined) {
+          const entry = read.payload.runs.find((item) => item.id === runId);
+          // The query is scoped to the run, so an unlisted run falls back to the
+          // total only when the payload lists no runs at all.
+          const tokens = entry?.usage ?? (read.payload.runs.length === 0 ? read.payload.totalUsage : undefined);
+          const cost = entry?.cost ?? (read.payload.runs.length === 0 ? read.payload.cost : undefined);
+          if (tokens !== undefined) {
+            usage = {
+              inputTokens: tokens.inputTokens ?? 0,
+              outputTokens: tokens.outputTokens ?? 0,
+              cacheReadTokens: tokens.cacheReadTokens ?? 0,
+              cacheWriteTokens: tokens.cacheWriteTokens ?? 0,
+              totalTokens: tokens.totalTokens,
+              rawCostCents: cost?.rawCostCents ?? null,
+            };
+          }
+        }
+      }
+
+      const structured = {
+        agentId: args.agentId,
+        outcome,
+        runId: run?.id ?? null,
+        runStatus: run?.status ?? null,
+        terminal: terminal ?? null,
+        usage,
+      };
+      return ok({
+        source: `POST /v1/agents/${args.agentId}/runs`,
+        text:
+          JSON.stringify(structured) +
+          (outcome === "agent_archived"
+            ? "\nThe agent is archived, so no run was created; unarchive it (cursor_unarchive_agent) first."
+            : ""),
+        structured,
         policy,
       });
     },

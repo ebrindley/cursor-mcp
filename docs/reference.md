@@ -276,6 +276,7 @@ which this server does not do.
 | `cursor_get_artifact_url` | `GET /v1/agents/{id}/artifacts/download` | |
 | `cursor_create_agent` | `POST /v1/agents` | yes |
 | `cursor_create_run` | `POST /v1/agents/{id}/runs` | yes |
+| `cursor_keep_awake` | one `POST /v1/agents/{id}/runs` with a fixed minimal prompt, a poll of that run, one terminal status read, and a usage read for a finished run; `terminal` and `usage` are `null` when unavailable | yes, starts paid agent work |
 | `cursor_cancel_run` | `POST /v1/agents/{id}/runs/{runId}/cancel` | yes |
 | `cursor_archive_agent` | `POST /v1/agents/{id}/archive` | yes |
 | `cursor_unarchive_agent` | `POST /v1/agents/{id}/unarchive` | yes |

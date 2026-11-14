@@ -15,8 +15,17 @@ import { READ, CANCEL, DESTRUCTIVE, REVERSIBLE } from './annotations.js';
 
 const STREAM_LOSS_HINT = 'Output stream failed; see reason and cleanup. Do not resubmit uncertain work. For future jobs needing results after MCP restart, use caller-owned detached tmux with output and exit-status files, polled by short commands.';
 
+/**
+ * Filled by `registerTerminalTools` with an in-process `cursor_terminal_status`
+ * read, so another tool can report terminal readiness without a second client.
+ * Left unset when the terminal is not configured or the active profile does not
+ * permit `cursor_terminal_status`.
+ */
+export interface TerminalStatusProbe { status?: (agentId: string) => Promise<string | undefined> }
+
 export function registerTerminalTools(server: McpServer, policy: Policy, apiKey = '',
-  supplied?: Pick<TerminalService, 'handle' | 'close' | 'markDelivered'>, scope?: Pick<AgentScope, 'assert'>): string[] {
+  supplied?: Pick<TerminalService, 'handle' | 'close' | 'markDelivered'>, scope?: Pick<AgentScope, 'assert'>,
+  probe?: TerminalStatusProbe): string[] {
   const config = policy.terminal;
   if (!config) return [];
   const targets = new TerminalTargets(agentId => {
@@ -30,7 +39,8 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
   const profile = activeProfile(policy);
   const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
   const sessionId = z.string().uuid();
-  const invoke = async (operation: string, args: Record<string, unknown> = {}) => {
+  const invoke = async (operation: string, args: Record<string, unknown> = {}) => render(await collect(operation, args));
+  const collect = async (operation: string, args: Record<string, unknown> = {}) => {
     // Discovery admission has its own 30s slice before wake's precheck/submission/readiness phases.
     const budget = requestScope(operation === 'wake' ? 95000 + Number(args.waitMs ?? 30000) : 45000);
     let pending: ReturnType<typeof invokeBounded> | undefined;
@@ -86,8 +96,10 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
     if (result.status === 'command' && typeof result.agentId === 'string' && typeof result.commandId === 'string' &&
       typeof result.outputOffset === 'number' && typeof result.outputNextOffset === 'number' && typeof result.outputLength === 'number')
       targets.markDelivered(result.agentId, result.commandId, result.outputOffset, result.outputNextOffset, result.outputLength);
-    return ok({ source: 'Cursor direct VM terminal', text: terminalText(result), structured: result, policy });
+    return result;
   };
+  const render = (result: Record<string, unknown>) =>
+    ok({ source: 'Cursor direct VM terminal', text: terminalText(result), structured: result, policy });
   const add = (operation: string, description: string, schema: z.ZodRawShape, annotations: typeof READ | typeof CANCEL | typeof DESTRUCTIVE | typeof REVERSIBLE) => {
     if (!annotations.readOnlyHint && !config.executeEnabled) return;
     const name = `cursor_terminal_${operation}`;
@@ -119,5 +131,11 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
   add('session_read', 'Read recent 64 KiB with Unicode offsets; request up to 16384 code points per page (default 2000), subject to the response byte budget; follow outputNextOffset. outputGap counts evicted characters; reconnectGapPossible means uncertain continuity. Detached sessions attempt attachment once. waitMs cancellation leaves the shell running.', sessionRead, READ);
   add('session_attach', 'Reattach an owned terminal using its event cursor, then read output with session_read semantics. Never replays input. No adoption or recovery across MCP restart.', sessionRead, READ);
   add('session_close', 'Terminate and verify owned PTY absence; retry uncertain cleanup explicitly. forget=true only releases lost/identity-unknown records, reporting remoteOutcome unknown. Healthy terminals cannot be forgotten. MCP shutdown only detaches.', { ...owned, forget: z.boolean().default(false) }, CANCEL);
+  if (probe && names.includes('cursor_terminal_status')) {
+    probe.status = async (agentId: string) => {
+      const result = await collect('status', { agentId });
+      return typeof result.status === 'string' ? result.status : undefined;
+    };
+  }
   return names;
 }
