@@ -160,6 +160,66 @@ test('standalone auth caches its token, rediscovers machines, and rejects change
   expect(calls.filter(x => x.endsWith('GetMachine'))).toHaveLength(2);
 });
 
+test.each([
+  { name: 'legacy network token', changes: {}, host: 'tenant-test-pod-test-26054.cluster-test.cursorvm.com', auth: 'network_token', token: 'private-network' },
+  { name: 'unprefixed pod ID', changes: { podId: 'test' }, host: 'tenant-test-pod-test-26054.cluster-test.cursorvm.com', auth: 'network_token', token: 'private-network' },
+  { name: 'port token only', changes: { networkToken: undefined, portTokens: [{ port: 26054, token: 'private-port' }] }, host: 'tenant-test-pod-test-26054.cluster-test.cursorvm.com', auth: 'port_token', token: 'private-port' },
+  { name: 'port token precedence', changes: { portTokens: [{ port: 26054, token: 'private-port' }] }, host: 'tenant-test-pod-test-26054.cluster-test.cursorvm.com', auth: 'port_token', token: 'private-port' },
+  { name: 'unrelated port token', changes: { portTokens: [{ port: 6080, token: 'private-desktop' }] }, host: 'tenant-test-pod-test-26054.cluster-test.cursorvm.com', auth: 'network_token', token: 'private-network' },
+  { name: 'HTTPS proxy template', changes: { podProxyUrlTemplate: 'https://{tenantId}-{podId}-{port}.proxy.cursorvm.com/' }, host: 'tenant-test-pod-test-26054.proxy.cursorvm.com', auth: 'network_token', token: 'private-network' },
+])('terminal discovery connects with $name', async ({ changes, host, auth, token }) => {
+  const fetcher = vi.fn(async (url: string | URL | Request) => new Response(JSON.stringify(
+    String(url).endsWith('exchange_user_api_key') ? { accessToken: 'private-account' } : { machine: { pod: { ...pod, ...changes } } }))) as unknown as typeof fetch;
+  const urls: URL[] = [];
+  const connector = new CursorTerminalConnector('private-api-key', 'bc-test', fetcher, url => {
+    urls.push(new URL(url));
+    const socket = new Socket(); socket.respond = frame => socket.reply(frame.requestId);
+    return socket as unknown as WebSocket;
+  });
+  const connection = await connector.connect();
+  try {
+    expect(await connection.peer.unary('ListPtys', {})).toEqual({});
+    expect(urls).toHaveLength(1);
+    expect(urls[0]!.protocol).toBe('wss:'); expect(urls[0]!.host).toBe(host);
+    expect(urls[0]!.pathname).toBe('/');
+    expect([...urls[0]!.searchParams]).toEqual([[auth, token], ['token', 'private-pty']]);
+  } finally { connection.peer.close(); }
+});
+
+test.each([
+  { changes: { networkToken: undefined }, code: 'terminal_unavailable' },
+  { changes: { portTokens: [{ port: 26054, token: '' }] }, code: 'terminal_unavailable' },
+  { changes: { podProxyUrlTemplate: 'http://{tenantId}-{podId}-{port}.proxy.cursorvm.com' }, code: 'invalid_machine_response' },
+  { changes: { podProxyUrlTemplate: 'ws://{tenantId}-{podId}-{port}.proxy.cursorvm.com' }, code: 'invalid_machine_response' },
+  { changes: { podProxyUrlTemplate: 'not a URL' }, code: 'invalid_machine_response' },
+  { changes: { portTokens: 'invalid' }, code: 'invalid_machine_response' },
+])('unusable authenticated routing fails before opening a socket: $changes', async ({ changes, code }) => {
+  const fetcher = vi.fn(async (url: string | URL | Request) => new Response(JSON.stringify(
+    String(url).endsWith('exchange_user_api_key') ? { accessToken: 'private-account' } : { machine: { pod: { ...pod, ...changes } } }))) as unknown as typeof fetch;
+  const socketFactory = vi.fn(() => new Socket() as unknown as WebSocket);
+  const connector = new CursorTerminalConnector('private-api-key', 'bc-test', fetcher, socketFactory);
+  await expect(connector.connect()).rejects.toMatchObject({ code });
+  expect(socketFactory).not.toHaveBeenCalled();
+});
+
+test('rotating routing credentials and templates do not change the pinned machine identity', async () => {
+  vi.stubGlobal('WebSocket', undefined);
+  try {
+    let discovery = 0;
+    const fetcher = vi.fn(async (url: string | URL | Request) => new Response(JSON.stringify(
+      String(url).endsWith('exchange_user_api_key') ? { accessToken: 'private-account' } : { machine: { pod: {
+        ...pod, networkToken: undefined, portTokens: [{ port: 26054, token: `private-port-${++discovery}` }],
+        podProxyUrlTemplate: `https://{tenantId}-{podId}-{port}.proxy-${discovery}.cursorvm.com`,
+      } } }))) as unknown as typeof fetch;
+    const connector = new CursorTerminalConnector('private-api-key', 'bc-test', fetcher, () => new Socket() as unknown as WebSocket);
+    const first = await connector.connect();
+    try {
+      const second = await connector.connect(first.machineId);
+      expect(second.machineId).toBe(first.machineId); second.peer.close();
+    } finally { first.peer.close(); }
+  } finally { vi.unstubAllGlobals(); }
+});
+
 test('authentication denial is sanitized, makes no discovery call, and never becomes ready', async () => {
   const fetcher = vi.fn(async () => new Response(JSON.stringify({ message: 'private-account private-api-key' }), { status: 403 })) as unknown as typeof fetch;
   const connector = new CursorTerminalConnector('private-api-key', 'bc-test', fetcher, () => new Socket() as unknown as WebSocket);

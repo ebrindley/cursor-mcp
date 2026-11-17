@@ -23,8 +23,31 @@ export interface TerminalPeer {
   settleAccepted?(): Promise<void>;
   close(): void;
 }
-export type Pod = { podId: string; tenantId: string; cluster: string; networkToken: string; ptyAuthToken: string };
+export type Pod = { podId: string; tenantId: string; cluster: string; ptyAuthToken: string;
+  networkToken?: string; portTokens?: { port: number; token: string }[]; podProxyUrlTemplate?: string };
 export type SocketFactory = (url: string) => WebSocket;
+
+/** Routing and credentials come only from authenticated GetMachine responses. */
+function gatewayUrl(pod: Pod): string {
+  const label = /^[a-zA-Z0-9-]+$/;
+  if (![pod.tenantId, pod.podId, pod.cluster].every(value => label.test(value)))
+    throw new TerminalFailure('invalid_machine_response');
+  const id = `pod-${pod.podId.replace(/^pod-/, '')}`;
+  const base = pod.podProxyUrlTemplate
+    ? pod.podProxyUrlTemplate.replaceAll('{tenantId}', pod.tenantId).replaceAll('{podId}', id)
+      .replaceAll('{port}', '26054').replace(/\/+$/, '').replace(/^http/, 'ws')
+    : `wss://${pod.tenantId}-${id}-26054.${pod.cluster}.cursorvm.com`;
+  let url: URL;
+  try { url = new URL(`${base}/`); } catch { throw new TerminalFailure('invalid_machine_response'); }
+  if (url.protocol !== 'wss:') throw new TerminalFailure('invalid_machine_response');
+  const portToken = pod.portTokens?.find(entry => entry.port === 26054);
+  const token = portToken ? portToken.token : pod.networkToken;
+  if (!token) throw new TerminalFailure('terminal_unavailable');
+  url.searchParams.delete('network_token'); url.searchParams.delete('port_token');
+  url.searchParams.set(portToken ? 'port_token' : 'network_token', token);
+  url.searchParams.set('token', pod.ptyAuthToken);
+  return url.toString();
+}
 
 /** Cursor's gateway envelope carrying ordinary Connect JSON messages. No IDE IPC. */
 export class TerminalGateway implements TerminalPeer {
@@ -46,16 +69,11 @@ export class TerminalGateway implements TerminalPeer {
     if (this.disposed) return Promise.reject(new TerminalFailure('terminal_closed'));
     if (this.socket?.readyState === 1) return Promise.resolve(this.socket);
     if (this.opening) return this.opening;
-    // Routing values are supplied only by authenticated GetMachine, never by a tool caller.
-    const label = /^[a-zA-Z0-9-]+$/;
-    if (![this.pod.tenantId, this.pod.podId, this.pod.cluster].every(value => label.test(value)))
-      return Promise.reject(new TerminalFailure('invalid_machine_response'));
-    const url = new URL(`wss://${this.pod.tenantId}-pod-${this.pod.podId.replace(/^pod-/, '')}-26054.${this.pod.cluster}.cursorvm.com/`);
-    url.searchParams.set('network_token', this.pod.networkToken);
-    url.searchParams.set('token', this.pod.ptyAuthToken);
+    let url: string;
+    try { url = gatewayUrl(this.pod); } catch (error) { return Promise.reject(error); }
     this.opening = new Promise<WebSocket>((resolve, reject) => {
       let socket: WebSocket;
-      try { socket = this.socketFactory(url.toString()); }
+      try { socket = this.socketFactory(url); }
       catch { reject(new TerminalFailure('gateway_unavailable')); return; }
       this.socket = socket;
       let opened = false;
@@ -327,9 +345,15 @@ export class CursorTerminalConnector implements TerminalConnector {
         }
         const pod = object(value.machine) && object(value.machine.pod) ? value.machine.pod : undefined;
         if (!pod) throw new TerminalFailure('machine_unavailable');
-        if (!['podId', 'tenantId', 'cluster', 'networkToken', 'ptyAuthToken'].every(key => typeof pod[key] === 'string' && pod[key]))
+        if (!['podId', 'tenantId', 'cluster', 'ptyAuthToken'].every(key => typeof pod[key] === 'string' && pod[key]))
           throw new TerminalFailure('terminal_unavailable');
+        if (pod.networkToken !== undefined && typeof pod.networkToken !== 'string' ||
+          pod.podProxyUrlTemplate !== undefined && typeof pod.podProxyUrlTemplate !== 'string' ||
+          pod.portTokens !== undefined && (!Array.isArray(pod.portTokens) || !pod.portTokens.every(entry =>
+            object(entry) && Number.isInteger(entry.port) && typeof entry.token === 'string')))
+          throw new TerminalFailure('invalid_machine_response');
         const routing = pod as Pod;
+        gatewayUrl(routing);
         const machineId = `${routing.tenantId}/${routing.cluster}/${routing.podId}`;
         if (expectedMachineId !== undefined && expectedMachineId !== machineId) throw new TerminalFailure('machine_changed');
         if (signal?.aborted) throw new TerminalFailure('request_cancelled');
