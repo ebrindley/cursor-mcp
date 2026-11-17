@@ -317,6 +317,15 @@ describe("combined assessment", () => {
     expect(result.nextSteps.join(" ")).toContain("cursor_get_active_build");
   });
 
+  it("reports an unobserved baseline commit even when the version matches", () => {
+    const result = assess({ builds: healthyRows, environmentJsonPath: ".cursor/environment.json",
+      baseline: { environmentVersionPublicId: "v1", commitSha: "abc" },
+      observed: { environmentVersionPublicId: "v1" }, refreshRequested: true });
+    expect(result.source.drift).toBe("unknown");
+    expect(result.state).toBe("INDETERMINATE");
+    expect(result.exitCode).toBe(30);
+  });
+
   it("is HEALTHY on Build evidence alone when nothing else was declared", () => {
     const result = assess({
       builds: healthyRows,

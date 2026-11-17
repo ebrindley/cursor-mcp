@@ -320,10 +320,12 @@ export function assessSourceFreshness(args: {
   ];
   const comparisons: SourceFreshness["comparisons"] = [];
   let declared = false;
+  let missingObservation = false;
   for (const anchor of anchors) {
     const baseline = args.baseline?.[anchor];
     const observed = args.observed?.[anchor];
     if (baseline !== undefined || observed !== undefined) declared = true;
+    if (baseline !== undefined && observed === undefined) missingObservation = true;
     if (baseline === undefined || observed === undefined) continue;
     comparisons.push({ anchor, baseline, observed, changed: baseline !== observed });
   }
@@ -334,7 +336,7 @@ export function assessSourceFreshness(args: {
   const drift: SourceDrift =
     changedAnchors.length > 0 || pending.length > 0
       ? "changed"
-      : comparisons.length > 0
+      : comparisons.length > 0 && !missingObservation
         ? "unchanged"
         : declared
           ? "unknown"
@@ -405,8 +407,8 @@ function sourceReason(args: {
       );
     case "unknown":
       return (
-        "A source comparison needs both a recorded baseline anchor and an observed one; only one side " +
-        "was supplied, so source freshness is unproven rather than unchanged." + pendingSentence
+        "A recorded baseline anchor has no matching observation, or no baseline was supplied for comparison. " +
+        "Source freshness is unproven." + pendingSentence
       );
     default:
       return (
