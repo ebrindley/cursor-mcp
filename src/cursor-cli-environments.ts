@@ -137,37 +137,32 @@ export function normalizeScope(row: Record<string, unknown>): CliEnvironmentScop
 
 /** Repository entries as URLs or `owner/name`, from either shape the CLI uses. */
 export function normalizeRepos(row: Record<string, unknown>): string[] {
-  const out: string[] = [];
+  return listedRepos(row).repos;
+}
+
+function listedRepos(row: Record<string, unknown>): { repos: string[]; complete: boolean } {
+  const repos = new Set<string>();
+  let complete = true;
   for (const key of ["repos", "repositories", "repositoryDependencies"]) {
     const value = row[key];
-    if (!Array.isArray(value)) continue;
+    if (value === undefined) continue;
+    if (!Array.isArray(value)) {
+      complete = false;
+      continue;
+    }
     for (const entry of value) {
-      const direct = trimmedString(entry);
-      if (direct !== undefined) {
-        try {
-          out.push(canonicalRepo(direct).url);
-        } catch {
-          // Credential-bearing, non-GitHub, and malformed repositories are not
-          // safe catalog output and cannot match the policy's repository model.
-        }
+      const repo = isRecord(entry)
+        ? trimmedString(entry.url) ?? trimmedString(entry.repository) ?? trimmedString(entry.name)
+        : trimmedString(entry);
+      if (repo === undefined) {
+        complete = false;
         continue;
       }
-      if (!isRecord(entry)) continue;
-      const named =
-        trimmedString(entry.url) ??
-        trimmedString(entry.repository) ??
-        trimmedString(entry.name);
-      if (named !== undefined) {
-        try {
-          out.push(canonicalRepo(named).url);
-        } catch {
-          // Same fail-closed normalization as the direct string form above.
-        }
-      }
+      try { repos.add(canonicalRepo(repo).url); }
+      catch { complete = false; }
     }
   }
-  // Deduplicated, order preserved: two shapes may name the same repository.
-  return [...new Set(out)];
+  return { repos: [...repos], complete };
 }
 
 /** The rows of an `env list` payload, whichever envelope key it used. */
@@ -492,6 +487,7 @@ export interface CliWriteTarget {
   scope: CliEnvironmentScope;
   repos: string[];
   name?: string;
+  incompleteRepos?: true;
   /** Resolved for delete dispatch. Never serialized onto a caller result. */
   internalId?: number;
 }
@@ -530,10 +526,12 @@ export function resolveWriteTarget(
     if (!isRecord(row)) continue;
     const publicId = publicIdOf(row);
     if (publicId !== environmentPublicId) continue;
+    const membership = listedRepos(row);
     const target: CliWriteTarget = {
       environmentPublicId: publicId,
       scope: normalizeScope(row),
-      repos: normalizeRepos(row),
+      repos: membership.repos,
+      ...(membership.complete ? {} : { incompleteRepos: true }),
     };
     const name = trimmedString(row.name) ?? trimmedString(row.displayName);
     if (name !== undefined) target.name = name;
@@ -631,7 +629,7 @@ export function matchWriteBinding(
 
   const boundKeys = repoKeys(binding.repos);
   const targetKeys = repoKeys(target.repos);
-  if (boundKeys === undefined || targetKeys === undefined) {
+  if (target.incompleteRepos || boundKeys === undefined || targetKeys === undefined) {
     return {
       ok: false,
       status: "WRONG_REPO",

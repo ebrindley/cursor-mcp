@@ -868,6 +868,15 @@ describe("CLI environment writes", () => {
     expect(fake.calls.some((line) => line.startsWith("env "))).toBe(false);
   });
 
+  it.each([["unrecognized/repository/shape"], [{ other: "unmapped" }]])("refuses incomplete repository membership before issuing a write preview", async unknown => {
+    const fake = new FakeWriteCli();
+    fake.environments[0]!.repositories = [unknown];
+    const result = await publishEnvironmentWithCli({ cli: cliConfig(), runner: fake.runner(), binding: binding(), nowMs: NOW, restEmail: OWNER });
+    expect(result).toMatchObject({ status: "WRONG_REPO", dispatched: false });
+    expect(result.preview).toBeUndefined();
+    expect(fake.writeInvocations()).toEqual([]);
+  });
+
   it("refuses a write against the wrong environment, repository, or scope", async () => {
     const fake = new FakeWriteCli();
     const wrongEnv = await publishEnvironmentWithCli({
