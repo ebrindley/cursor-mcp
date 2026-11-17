@@ -21,6 +21,24 @@ const ActiveSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("build"), buildId: z.string().min(1) }),
   z.object({ type: z.literal("universal_image") }),
 ]);
+// Metadata on public Build rows that downstream tools accept alongside their
+// own required evidence. Keep their row inputs strict so misspellings fail.
+export const buildReadbackMetadata = {
+  outcome: z.string().optional(),
+  terminal: z.boolean().optional(),
+  trust: z.literal("api-key").optional(),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+  completedAt: z.string().optional(),
+  durationMs: z.number().nonnegative().optional(),
+  failure: BuildSchema.shape.failure,
+  compact: z.literal(true).optional(),
+  triggerType: z.string().min(1).optional(),
+  failureType: z.string().min(1).nullable().optional(),
+  createdAtMs: z.number().int().nonnegative().optional(),
+  completedAtMs: z.number().int().nonnegative().optional(),
+};
+
 const Block = z.record(z.string(), z.unknown());
 const Id = z.string().trim().min(1).max(200);
 const Target = { environment: Id.optional(), environmentPublicId: Id.optional() };

@@ -68,6 +68,7 @@ import { CREATE } from "./annotations.js";
 import type { GateableConfig, ToolSpec } from "./register.js";
 import { defineTool } from "./register.js";
 import { ok } from "./result.js";
+import { buildReadbackMetadata } from "./builds.js";
 
 const Block = z.record(z.string(), z.unknown());
 
@@ -175,6 +176,7 @@ export function registerEnvironmentLifecycleTools(
           .describe("Build believed active now, for rollback. Never guessed."),
         observed: z
           .strictObject({
+            ...buildReadbackMetadata,
             buildId: z.string().min(1),
             status: z.string().min(1),
             isDraft: z.boolean().optional(),

@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 import { CursorClient } from "../src/client.js";
 import type { Policy } from "../src/config.js";
 import { registerBuildReadTools } from "../src/tools/builds.js";
+import { registerEnvironmentHealthTools } from "../src/tools/environment-health.js";
+import { registerEnvironmentLifecycleTools } from "../src/tools/environment-lifecycle.js";
 
 const environment = { id: "env-alpha", name: "alpha", owner: "personal", repos: [{ url: "https://github.com/acme/app" }], createdAt: "2026-10-01", updatedAt: "2026-10-08" };
 const policy: Policy = { deleteEnabled: false, activationEnabled: false, defaultProfile: "p", maxResponseBytes: 32768,
@@ -21,6 +23,8 @@ async function invoke(name: string, args: Record<string, unknown>, responses: Re
   } });
   const server = new McpServer({ name: "test", version: "test" });
   registerBuildReadTools(server, client, configured);
+  if (name === "cursor_assess_environment_health") registerEnvironmentHealthTools(server, client, configured);
+  if (name === "cursor_run_environment_lifecycle") registerEnvironmentLifecycleTools(server, client, configured);
   const [a, b] = InMemoryTransport.createLinkedPair();
   const mcp = new Client({ name: "test", version: "test" });
   await Promise.all([server.connect(b), mcp.connect(a)]);
@@ -44,6 +48,27 @@ describe("public Build reads", () => {
     expect(row.observedAtMs).toBeGreaterThanOrEqual(before);
     expect(row.observedAtMs).toBeLessThanOrEqual(Date.now());
   });
+  it("passes returned Build rows directly to health and rollback", async () => {
+    const target = { environmentPublicId: environment.id };
+    const responses = { ...base, "/v1/environments/env-alpha/builds": { items: [{ ...build, draft: false }] },
+      "/v1/environments/env-alpha/builds/bld-1": { ...build, draft: false } };
+    const listed = await invoke("cursor_list_builds", target, responses);
+    const { builds } = listed.result.structuredContent as { builds: Record<string, unknown>[] };
+    const health = await invoke("cursor_assess_environment_health", { ...target, builds, buildsConclusive: true }, {});
+    expect(health.result.structuredContent).toMatchObject({ status: "HEALTHY" });
+    const typo = { ...builds[0], draft: true };
+    delete (typo as Record<string, unknown>).isDraft;
+    const invalid = await invoke("cursor_assess_environment_health", { ...target, builds: [typo], buildsConclusive: true }, {});
+    expect(invalid.result.isError).toBe(true);
+
+    const exact = await invoke("cursor_get_build", { ...target, buildId: build.id }, responses);
+    const configured = { ...policy, profiles: { p: { ...policy.profiles.p!, tools: ["*"] } } };
+    const rollback = await invoke("cursor_run_environment_lifecycle", { ...target, intent: "rollback", environment: "alpha",
+      buildId: build.id, supersededBuildId: "bld-other", observed: (exact.result.structuredContent as { build: Record<string, unknown> }).build }, {}, configured);
+    expect(rollback.result.isError).not.toBe(true);
+    expect(rollback.result.structuredContent).toHaveProperty("steps");
+  });
+
   it("returns the last Build when monitoring reaches its deadline during a request", async () => {
     let reads = 0;
     vi.useFakeTimers();

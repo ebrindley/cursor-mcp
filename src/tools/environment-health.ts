@@ -67,6 +67,7 @@ import {
 import type { GateableConfig, ToolSpec } from "./register.js";
 import { defineTool } from "./register.js";
 import { ok } from "./result.js";
+import { buildReadbackMetadata } from "./builds.js";
 
 /* ------------------------------------------------------------------- arguments */
 
@@ -83,8 +84,12 @@ const TargetIdArg = z
     "environmentPublicId declared out of band before the call. An id a run reported about itself is not a substitute.",
   );
 
+// Project the fields used for assessment from a full public Build row.
 const BuildRowArg = z
   .strictObject({
+    ...buildReadbackMetadata,
+    environmentPublicIdSource: z.enum(["row", "imputed"]).optional(),
+    observedAtMs: z.number().int().nonnegative().optional(),
     buildId: z.string().min(1),
     status: z
       .string()
@@ -92,18 +97,10 @@ const BuildRowArg = z
       .describe("status verbatim. An unrecognised value is never read as success."),
     environmentPublicId: z.string().min(1).optional(),
     source: z.string().min(1).optional(),
-    triggerType: z
-      .string()
-      .min(1)
-      .optional()
-      .describe("RECURRING, MANUAL, or CONFIG_CHANGE as the row carried it."),
-    failureType: z.string().min(1).nullable().optional(),
     isDraft: z
       .boolean()
       .optional()
       .describe("Draft rows are excluded from health: a draft Build is never the environment's Build."),
-    createdAtMs: z.number().int().nonnegative().optional(),
-    completedAtMs: z.number().int().nonnegative().optional(),
   })
   .describe("A Build row as cursor_list_builds reported it.");
 
