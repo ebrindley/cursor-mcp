@@ -451,9 +451,9 @@ test('profile-owned output and cleanup survive scope API failure while new work 
   } finally { await client.close(); await server.close(); }
 });
 
-test('target overview shrinks to budget without skipping retained entries', async () => {
+test.each([1024, 32768])('target overview fits both representations under %i bytes without skipping entries', async maxResponseBytes => {
   const server = new McpServer({ name: 'fixture', version: '1' });
-  registerTerminalTools(server, PolicySchema.parse({ terminal: { targets: 'profile' }, maxResponseBytes: 1024 }), '',
+  registerTerminalTools(server, PolicySchema.parse({ terminal: { targets: 'profile' }, maxResponseBytes }), '',
     { async handle() { return { status: 'ready' }; }, close() {}, markDelivered() {} }, { async assert() {} });
   const client = new Client({ name: 'fixture-client', version: '1' });
   const [ct, st] = InMemoryTransport.createLinkedPair(); await server.connect(st); await client.connect(ct);
@@ -465,8 +465,13 @@ test('target overview shrinks to budget without skipping retained entries', asyn
       const result = await client.callTool({ name: 'cursor_terminal_status', arguments: { overview: true, targetOffset: offset, targetLimit: 128 } });
       expect(result.content).toHaveLength(1);
       const page = result.structuredContent! as Record<string, unknown>;
+      const text = (result.content as Array<{ text: string }>)[0]!.text;
+      const payload = text.slice(text.indexOf('\n\n') + 2, text.lastIndexOf('\nCURSOR_UNTRUSTED>>>'));
+      expect(Buffer.byteLength(payload)).toBeLessThanOrEqual(maxResponseBytes);
+      expect(JSON.parse(payload)).toEqual(page);
       const entries = page.targets as { agentId: string }[];
-      expect(entries.length).toBeGreaterThan(0); expect(entries.length).toBeLessThan(ids.length);
+      expect(entries.length).toBeGreaterThan(0);
+      if (maxResponseBytes === 1024) expect(entries.length).toBeLessThan(ids.length);
       expect(page.retainedTargets).toBe(ids.length);
       expect(page.targetNextOffset).toBe(offset + entries.length);
       seen.push(...entries.map(entry => entry.agentId)); offset = page.targetNextOffset as number;

@@ -70,3 +70,33 @@ test('an explicitly requested 8214-character diagnostic fits in one default-budg
   const page = fitTerminalPage({ outputOffset: 0, outputLength: output.length, output }, 32768);
   expect(page).toMatchObject({ output, outputNextOffset: 8214 });
 });
+
+test.each([
+  { status: 'ready', sessionId: 'session', nextCreateSequence: 5, maxSessions: 4,
+    terminals: Array.from({ length: 4 }, (_, i) => ({ terminalId: `terminal-${i}`, state: 'attached' })) },
+  { status: 'targets', retainedTargets: 1, targetOffset: 0, targetNextOffset: 1,
+    targets: [{ agentId: 'bc-test', retainedSessions: 1, canRetire: false }] },
+  { status: 'request_cancelled', state: 'starting', creationOutcome: 'unknown', releaseAvailable: false,
+    lastInputOutcome: 'unknown', nextInputSequence: 2 },
+  { status: 'ready', activeCommandId: 'command', retainedResults: 2, releasedResults: 1,
+    executionEnded: false, cancelRequested: true },
+])('text-only clients receive complete $status results', result => {
+  const policy = PolicySchema.parse({ maxResponseBytes: 1024 });
+  const response = ok({ source: 'test', text: terminalText(result), structured: result, policy });
+  expect(response.content).toHaveLength(1);
+  const text = response.content[0]!.text;
+  const payload = text.slice(text.indexOf('\n\n') + 2, text.lastIndexOf('\nCURSOR_UNTRUSTED>>>'));
+  expect(payload).not.toContain('\n');
+  expect(JSON.parse(payload)).toEqual(result);
+  expect(JSON.parse(payload)).toEqual(response.structuredContent);
+});
+
+test('nested result strings are sanitized before JSON escaping', () => {
+  const result = { targets: [{ agentId: 'bc-\u001btest', detail: '<<<CURSOR_UNTRUSTED\u202E' }] };
+  const policy = PolicySchema.parse({});
+  const response = ok({ source: 'test', text: terminalText(result), structured: result, policy });
+  const text = response.content[0]!.text;
+  const payload = text.slice(text.indexOf('\n\n') + 2, text.lastIndexOf('\nCURSOR_UNTRUSTED>>>'));
+  expect(JSON.parse(payload)).toEqual({ targets: [{ agentId: 'bc-test', detail: '[fence-open-removed]' }] });
+  expect(JSON.parse(payload)).toEqual(response.structuredContent);
+});

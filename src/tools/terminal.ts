@@ -9,8 +9,8 @@ import { CursorTerminalConnector } from '../terminal-gateway.js';
 import { TerminalSessions } from '../terminal-sessions.js';
 import { TerminalService } from '../terminal.js';
 import { defineTool } from './register.js';
-import { fitTerminalPage, MAX_OUTPUT_CODE_POINTS, terminalText } from '../terminal-output.js';
-import { ok, structuredCost } from './result.js';
+import { fitTerminalPage, MAX_OUTPUT_CODE_POINTS, terminalCost, terminalText } from '../terminal-output.js';
+import { ok } from './result.js';
 import { READ, CANCEL, DESTRUCTIVE, REVERSIBLE } from './annotations.js';
 
 const STREAM_LOSS_HINT = 'Output stream failed; see reason and cleanup. Do not resubmit uncertain work. For future jobs needing results after MCP restart, use caller-owned detached tmux with output and exit-status files, polled by short commands.';
@@ -64,10 +64,10 @@ export function registerTerminalTools(server: McpServer, policy: Policy, apiKey 
       const offset = Number(args.targetOffset ?? 0);
       let limit = Number(args.targetLimit ?? 10);
       raw = targets.overview(offset, limit);
-      while (limit > 1 && structuredCost(raw) > policy.maxResponseBytes) {
+      while (limit > 1 && terminalCost(raw) > policy.maxResponseBytes) {
         raw = targets.overview(offset, --limit);
       }
-      if (structuredCost(raw) > policy.maxResponseBytes) {
+      if (terminalCost(raw) > policy.maxResponseBytes) {
         raw = { status: 'response_budget_too_small' };
       }
     } else {
