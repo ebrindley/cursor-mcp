@@ -145,6 +145,24 @@ describe("a bulk job", () => {
     expect(peakPerMinute(gets)).toBeLessThanOrEqual(30);
   });
 
+  it("preserves write capacity while refreshing stale scope", async () => {
+    const fake = fakeCursor();
+    const job = setup(fake, { writesPerMinute: 1, maxInFlight: 3, jobTimeoutMinutes: 4 }).start("archive", ids(3));
+    await finish(job, 1000);
+    expect(job.snapshot().counts.done).toBe(3);
+    expect(peakPerMinute(fake.calls.filter(c => c.method === "POST").map(c => c.at))).toBe(1);
+  });
+
+  it("preserves endpoint cooldown after exhausting one item's retries", async () => {
+    const fake = fakeCursor({ post: id => id === "bc-first" ? rateLimited(30) : json({ id }) });
+    const job = setup(fake, { maxRateLimitRetries: 0, maxInFlight: 1 }).start("archive", ["bc-first", "bc-next"]);
+    await finish(job);
+    const posts = fake.calls.filter(c => c.method === "POST");
+    expect(posts).toHaveLength(2);
+    expect(posts[1]!.at - posts[0]!.at).toBeGreaterThanOrEqual(30_000);
+    expect(job.snapshot().counts.done).toBe(1);
+  });
+
   it("processes a repeated id once", async () => {
     const fake = fakeCursor();
     const job = setup(fake).start("unarchive", ["bc-1", "bc-1", "bc-2"]);

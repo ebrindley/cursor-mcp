@@ -120,8 +120,8 @@ export class RateWindow {
     this.#blockedUntil = Math.max(this.#blockedUntil, this.clock.now() + ms);
   }
 
-  /** Resolves true once a slot is taken, false if `signal` aborts first. */
-  async acquire(signal: AbortSignal): Promise<boolean> {
+  /** An expired scope verdict leaves the newly available slot uncharged. */
+  async acquire(signal: AbortSignal, validUntil = Infinity): Promise<boolean> {
     for (;;) {
       if (signal.aborted) return false;
       const now = this.clock.now();
@@ -134,6 +134,7 @@ export class RateWindow {
       } else if (this.#stamps.length >= this.limit) {
         waitMs = this.#stamps[0]! + WINDOW_MS - now;
       } else {
+        if (now > validUntil) return false;
         this.#stamps.push(now);
         this.attempts += 1;
         return true;
@@ -370,12 +371,12 @@ export class BulkJob {
     const onRateLimit = (window: RateWindow, waitMs: number | undefined): boolean => {
       this.rateLimited += 1;
       rateLimited += 1;
+      const wait = this.#backoff(rateLimited, waitMs);
+      window.cooldown(wait);
       if (rateLimited > settings.maxRateLimitRetries) {
         this.#settle(item, "failed", "RATE_LIMITED", 429);
         return false;
       }
-      const wait = this.#backoff(rateLimited, waitMs);
-      window.cooldown(wait);
       item.state = "retrying";
       item.nextAttemptAt = (clock.wallNow?.() ?? clock.now()) + wait;
       return true;
@@ -437,9 +438,10 @@ export class BulkJob {
         return this.#settle(item, "failed", failure.code, failure.httpStatus);
       }
 
-      if (!(await writes.acquire(admission))) return this.#notSubmitted(item);
-      // A long wait for a write slot means the verdict is stale: read again.
-      if (clock.now() - readAt > FRESHNESS_MS) continue;
+      if (!(await writes.acquire(admission, readAt + FRESHNESS_MS))) {
+        if (admission.aborted) return this.#notSubmitted(item);
+        continue; // Refresh scope before claiming a write slot.
+      }
 
       item.state = "inFlight";
       item.attempts += 1;
