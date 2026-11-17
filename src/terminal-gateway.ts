@@ -152,6 +152,8 @@ export class TerminalGateway implements TerminalPeer {
           if (frame.type === 4) {
             if (status !== undefined || !Number.isInteger(frame.status)) throw new Error();
             status = frame.status as number;
+            if (streaming && status !== 200)
+              return fail(status === 401 || status === 403 ? 'terminal_permission_denied' : 'terminal_rpc_failed');
           } else if (frame.type === 3) {
             if (status === undefined || typeof frame.body !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(frame.body)) throw new Error();
             buffer = Buffer.concat([buffer, Buffer.from(frame.body, 'base64')]);

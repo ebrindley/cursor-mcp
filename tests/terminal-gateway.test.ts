@@ -64,6 +64,31 @@ test('Connect stream reconstructs split headers/payloads and a coalesced termina
   f.gateway.close();
 });
 
+test.each([401, 403, 503])('stream rejects HTTP %i headers without waiting for a body or end frame', async status => {
+  const f = fixture(), controller = new AbortController(), events = vi.fn();
+  let failure: unknown;
+  const result = f.gateway.stream('AttachPty', { ptyId: 'owned' }, events, controller.signal).catch(error => { failure = error; });
+  f.socket().respond = frame => f.socket().frame({ type: 4, requestId: frame.requestId, status });
+  try {
+    await vi.waitFor(() => expect(failure).toMatchObject({ submitted: true,
+      code: status === 401 || status === 403 ? 'terminal_permission_denied' : 'terminal_rpc_failed',
+      detail: { operation: 'AttachPty', httpStatus: status } }));
+    expect(f.socket().sent.filter(frame => frame.type === 2)).toEqual([{ type: 2, requestId: f.socket().sent[0]!.requestId }]);
+    expect(events).not.toHaveBeenCalled();
+  } finally { f.gateway.close(); await result; }
+});
+
+test('a JSON rejection body cannot become a Connect framing error or leak into the failure', async () => {
+  const f = fixture(), controller = new AbortController();
+  const result = f.gateway.stream('AttachPty', { ptyId: 'owned' }, () => {}, controller.signal);
+  f.socket().respond = frame => f.socket().reply(frame.requestId, { code: 'permission_denied', message: 'private-pty' }, 403);
+  try {
+    const error = await result.catch(error => error);
+    expect(error).toMatchObject({ code: 'terminal_permission_denied', detail: { operation: 'AttachPty', httpStatus: 403 } });
+    expect(JSON.stringify(error)).not.toContain('private-pty');
+  } finally { f.gateway.close(); }
+});
+
 test.each(['error', 'truncated', 'oversize', 'malformed'] as const)('invalid stream %s rejects without leaking gateway secrets', async mode => {
   const f = fixture(), controller = new AbortController();
   const result = f.gateway.stream('AttachPty', { ptyId: 'owned' }, () => {}, controller.signal);
