@@ -396,6 +396,12 @@ describe("trigger attribution", () => {
     expect(result.isDraft).toBe(true);
   });
 
+  it("requires an observed baseline before attributing a Build by difference", () => {
+    const evidence = { trigger: {}, rows: [row({ buildId: "bld-only" })], otherActiveRuns: 0 };
+    expect(attribute(evidence).buildId).toBeUndefined();
+    expect(attribute({ ...evidence, baselineBuildIds: [] }).buildId).toBe("bld-only");
+  });
+
   it("adopts exactly one row absent from the baseline when no id came back", () => {
     const result = attribute({
       trigger: {},

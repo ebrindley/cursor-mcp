@@ -1108,6 +1108,14 @@ export function attributeTriggeredBuild(args: {
     };
   }
 
+  if (args.baselineBuildIds === undefined) {
+    return {
+      ...base, ...draftFlags, status: "NOT_ACCEPTED_UNKNOWN", source: "none",
+      reason: "The trigger returned no Build ID and the pre-trigger baseline was omitted. Listed Builds cannot be attributed to this request.",
+      nextSteps: ["Reconcile the environment with cursor_list_builds before acting.", NEVER_RETRIGGER],
+    };
+  }
+
   const candidates = (args.rows ?? [])
     .filter((row) => !baseline.has(row.buildId))
     .map((row) => row.buildId);
