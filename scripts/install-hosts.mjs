@@ -63,8 +63,10 @@ function valueEnd(text, start) {
     const c = text[i];
     if (quote) {
       if (quote === '"' && c === '\\') { i++; continue; }
-      if (triple && text.slice(i, i + 3) === quote.repeat(3)) { quote = ''; triple = false; i += 2; }
-      else if (!triple && c === quote) quote = '';
+      if (triple && text.slice(i, i + 3) === quote.repeat(3)) {
+        while (text[i + 1] === quote) i++;
+        quote = ''; triple = false;
+      } else if (!triple && c === quote) quote = '';
     } else if (c === '"' || c === "'") {
       quote = c; triple = text.slice(i, i + 3) === c.repeat(3); if (triple) i += 2;
     } else if (c === '[' || c === '{') depth++;
@@ -93,44 +95,82 @@ function stringArray(value) {
   skip(); if (index !== value.length) throw new Error('Unsupported trailing TOML args');
   return strings;
 }
+// Scan complete statements so comments, multiline values and unrelated tables
+// cannot masquerade as a registration. A dot inside a quoted key is literal.
+const keyPart = /[A-Za-z0-9_-]+|'[^'\r\n]*'|"(?:\\.|[^"\\\r\n])*"/g;
+function keyName(raw) {
+  if (raw[0] === "'") return raw.slice(1, -1);
+  if (raw[0] !== '"') return raw;
+  // Only Unicode and hex escapes can spell a character in a launcher key.
+  return raw.slice(1, -1).replace(/\\(?:u[\da-fA-F]{4}|U[\da-fA-F]{8}|x[\da-fA-F]{2}|.)/g,
+    escape => escape.length > 2 ? String.fromCodePoint(parseInt(escape.slice(2), 16)) : escape);
+}
 function tomlConfig(text, allow, host) {
-  const header = /^\[\s*(?:mcp_servers|"mcp_servers"|'mcp_servers')\s*\.\s*(?:cursor|"cursor"|'cursor')\s*\][ \t]*(?:#.*)?$/gm;
-  const matches = [...text.matchAll(header)];
-  if (matches.length > 1) throw new Error('Duplicate cursor TOML tables');
-  if (!matches.length) {
-    if (!allow) return null;
-    if (/^\s*mcp_servers\s*=|^\s*\[\s*mcp_servers\s*\]/m.test(text)) throw new Error('Unsupported inline/dotted MCP config layout; registration retained');
-    return `${text}${text.endsWith('\n') || !text ? '' : '\n'}\n[mcp_servers.cursor]\ncommand = ${JSON.stringify(options.node)}\nargs = ${JSON.stringify([entry])}\n${host === 'codex' ? 'env_vars = ["CURSOR_API_KEY", "PATH", "HOME"]\n' : ''}`;
+  const part = '(?:' + keyPart.source + ')';
+  const statement = new RegExp('^[ \\t]*(\\[\\[?)?[ \\t]*(' + part + '(?:[ \\t]*\\.[ \\t]*' + part + ')*)[ \\t]*(=|\\]\\]?)[ \\t]*', 'gm');
+  let table = [];
+  let found = false, inCursor = false, unsupported = false;
+  const edits = [];
+  const seen = new Set();
+  let match;
+  while ((match = statement.exec(text))) {
+    const names = match[2].match(keyPart).map(keyName);
+    if (match[1]) {
+      table = names;
+      inCursor = match[1] === '[' && table.length === 2 && table[0] === 'mcp_servers' && table[1] === 'cursor';
+      if (inCursor) {
+        if (found) throw new Error('Duplicate cursor TOML tables');
+        found = true;
+      }
+      if (table[0] === 'mcp_servers' && (table[1] === 'cursor' || table.length === 1 && match[1] === '[[')) unsupported = true;
+      continue;
+    }
+    const start = statement.lastIndex;
+    const stop = valueEnd(text, start);
+    statement.lastIndex = stop;
+    const full = [...table, ...names];
+    if (full[0] === 'mcp_servers' && (full.length === 1 || full[1] === 'cursor')) unsupported = true;
+    if (!inCursor || names.length !== 1) continue;
+    const [name] = names;
+    if (name === 'url') throw new Error('Existing cursor registration is not stdio');
+    if (name !== 'command' && name !== 'args') continue;
+    if (seen.has(name)) throw new Error('Duplicate TOML command key');
+    seen.add(name);
+    const raw = text.slice(start, stop).trim();
+    const value = name === 'command' ? stringArray('[' + raw + ']')[0] : stringArray(raw);
+    edits.push({ key: name, start, stop, value });
   }
-  const match = matches[0]; const begin = match.index + match[0].length;
-  const after = text.slice(begin); const next = after.search(/^\s*\[/m); const end = next < 0 ? text.length : begin + next;
-  const table = text.slice(begin, end); const edits = []; const seen = new Set();
-  const key = /^[ \t]*(command|args|url)[ \t]*=[ \t]*/gm;
-  let m;
-  while ((m = key.exec(table))) {
-    if (seen.has(m[1])) throw new Error('Duplicate TOML command key'); seen.add(m[1]);
-    if (m[1] === 'url') throw new Error('Existing cursor registration is not stdio');
-    const start = m.index + m[0].length; const stop = valueEnd(table, start);
-    const raw = table.slice(start, stop).trim();
-    const value = m[1] === 'command' ? stringArray(`[${raw}]`)[0] : stringArray(raw);
-    edits.push({ key: m[1], start, stop, value }); key.lastIndex = stop;
+  if (!found) {
+    if (!allow) return null;
+    if (unsupported) throw new Error('Unsupported inline/dotted MCP config layout; registration retained');
+    return `${text}${text.endsWith('\n') || !text ? '' : '\n'}\n[mcp_servers.cursor]\ncommand = ${JSON.stringify(options.node)}\nargs = ${JSON.stringify([entry])}\n${host === 'codex' ? 'env_vars = ["CURSOR_API_KEY", "PATH", "HOME"]\n' : ''}`;
   }
   if (!seen.has('command') || !seen.has('args')) throw new Error('Unsupported TOML command layout; registration retained');
   const args = edits.find(edit => edit.key === 'args').value;
-  let changed = table;
+  let changed = text;
   for (const edit of edits.reverse()) {
     const value = edit.key === 'command' ? updatedCommand(edit.value, args) : updatedArgs(args);
     if (JSON.stringify(value) !== JSON.stringify(edit.value)) changed = changed.slice(0, edit.start) + JSON.stringify(value) + changed.slice(edit.stop);
   }
-  return text.slice(0, begin) + changed + text.slice(end);
+  return changed;
+}
+function configTarget(file, allow) {
+  if (!fs.lstatSync(file, { throwIfNoEntry: false })) return undefined;
+  try { return fs.realpathSync(file); }
+  catch (error) {
+    // An unselected host with a dangling config has no registration to migrate.
+    if (error.code === 'ENOENT' && !allow) return undefined;
+    throw error;
+  }
 }
 try {
   // Render every intended change before writing any registration.
   const changes = []; let registered = false;
   for (const host of ['claude', 'codex', 'grok', 'cursor']) {
-    const file = configs[host]; const exists = fs.existsSync(file);
-    const before = exists ? fs.readFileSync(file, 'utf8') : '';
+    const file = configs[host];
     const allow = addAllowed(host);
+    const target = configTarget(file, allow);
+    const before = target ? fs.readFileSync(target, 'utf8') : '';
     let after;
     if (host === 'claude' || host === 'cursor') {
       const result = jsonConfig(before, allow); if (!result) continue;
@@ -145,16 +185,17 @@ try {
       if (JSON.stringify(result.old) === JSON.stringify(result.next)) continue;
       after = result.text;
     } else { after = tomlConfig(before, allow, host); if (after !== null) registered = true; }
-    if (after !== null && after !== before) changes.push({ host, file, before, after, exists });
+    if (after !== null && after !== before) changes.push({ host, file, before, after, target });
   }
   for (const change of changes) {
     // Detect an editor/client write between our read and replacement.
-    if (fs.existsSync(change.file) !== change.exists || change.exists && fs.readFileSync(change.file, 'utf8') !== change.before) throw new Error('Configuration changed concurrently; rerun installation');
-    fs.mkdirSync(path.dirname(change.file), { recursive: true });
-    const temporary = `${change.file}.cursor-mcp-${process.pid}`;
+    const destination = change.target ?? change.file;
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    const temporary = `${destination}.cursor-mcp-${process.pid}`;
     try {
-      fs.writeFileSync(temporary, change.after, { flag: 'wx', mode: change.exists ? fs.statSync(change.file).mode & 0o777 : 0o600 });
-      fs.renameSync(temporary, change.file);
+      fs.writeFileSync(temporary, change.after, { flag: 'wx', mode: change.target ? fs.statSync(destination).mode & 0o777 : 0o600 });
+      if (configTarget(change.file, true) !== change.target || change.target && fs.readFileSync(destination, 'utf8') !== change.before) throw new Error('Configuration changed concurrently; rerun installation');
+      fs.renameSync(temporary, destination);
     } finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
     console.log(`${change.host}: Cursor MCP registration updated; existing settings retained.`);
   }

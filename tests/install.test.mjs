@@ -149,6 +149,41 @@ test('live updater lock prevents pin or state mutation', t => {
   assert.equal(f.read(path.join(f.dir, 'npm-calls')), '');
 });
 
+test('registration preserves a dotted Cursor table and unrelated settings', t => {
+  const f = fixture(t);
+  const file = path.join(f.home, '.codex/config.toml');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const before = 'mcp_servers."cursor".command = "node"\nmcp_servers.cursor.args = ["/old/bin.js"]\n';
+  fs.writeFileSync(file, before);
+  const result = f.run('install', '--yes', '--host', 'codex');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Unsupported inline\/dotted MCP config layout/);
+  assert.equal(f.read(file), before);
+});
+
+test('registration appends to unrelated dotted settings and ignores TOML inside strings', t => {
+  const f = fixture(t);
+  const file = path.join(f.home, '.codex/config.toml');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const before = 'mcp_servers.other.command = "other"\nnotes = """\n[mcp_servers.cursor]\n"""\n[project]\nmcp_servers.cursor = "example"\n';
+  fs.writeFileSync(file, before);
+  f.ok('install', '--yes', '--host', 'codex');
+  const after = f.read(file);
+  assert.equal(after.slice(0, before.length), before);
+  assert.match(after.slice(before.length), /\[mcp_servers\.cursor\]\ncommand = /);
+});
+
+test('registration preserves a relative file symlink when migrating the host', t => {
+  const f = fixture(t);
+  const file = path.join(f.home, '.claude.json'), target = path.join(f.home, 'managed.json');
+  fs.writeFileSync(target, JSON.stringify({ mcpServers: { cursor: { command: 'node', args: ['/old/dist/bin.js'] } } }), { mode: 0o600 });
+  fs.symlinkSync('managed.json', file);
+  f.pin();
+  assert.equal(fs.readlinkSync(file), 'managed.json');
+  assert.equal(fs.statSync(target).mode & 0o777, 0o600);
+  assert.deepEqual(JSON.parse(f.read(target)).mcpServers.cursor.args, [path.join(f.root, 'current/dist/bin.js')]);
+});
+
 test('invalid existing config prevents registration writes and retains credentials', t => {
   const f = fixture(t); const config = path.join(f.home, '.claude.json'); const text = '{"mcpServers":{"cursor":{"command":"node","args":["/old/dist/bin.js"],"envFile":"/fixture"}}}';
   fs.writeFileSync(config, text); fs.mkdirSync(path.join(f.home, '.cursor')); fs.writeFileSync(path.join(f.home, '.cursor/mcp.json'), '{broken');
