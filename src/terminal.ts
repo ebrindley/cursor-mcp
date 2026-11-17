@@ -46,8 +46,14 @@ export class TerminalService {
   constructor(private readonly agentId: string, private readonly connector: TerminalConnector,
     private readonly maxOutputBytes = 65536, private readonly maxResults = 32) {}
 
+  // A finished observer can still own a process on this machine.
+  private get blockingCommand() {
+    return this.active ?? [...this.results.values()].find(op =>
+      op.cleanup === 'termination_unconfirmed' || op.cleanup === 'identity_unknown');
+  }
+
   get canRetire() { return !this.active && this.results.size === 0; }
-  get retention() { return { retainedResults: this.results.size, activeCommandId: this.active?.commandId ?? null }; }
+  get retention() { return { retainedResults: this.results.size, activeCommandId: this.blockingCommand?.commandId ?? null }; }
 
   private async probe(scope: WaitScope): Promise<{ status: string; machineId: string | undefined } & ReturnType<typeof failureFields>> {
     let peer: TerminalPeer | undefined, machineId: string | undefined;
@@ -160,7 +166,7 @@ export class TerminalService {
   private async dispatch(request: TerminalRequest, signal?: AbortSignal): Promise<Record<string, unknown>> {
     if (signal?.aborted) return { status: 'request_cancelled', ...(request.operation === 'execute' ? { commandOutcome: 'not_submitted' } : {}) };
     if (request.operation === 'status') {
-      const base = { sessionId: this.sessionId, agentId: this.agentId, activeCommandId: this.active?.commandId ?? null,
+      const base = { sessionId: this.sessionId, agentId: this.agentId, activeCommandId: this.blockingCommand?.commandId ?? null,
         retainedResults: this.results.size, releasedResults: this.released.size, maxOutputBytes: this.maxOutputBytes, maxResults: this.maxResults };
       if (this.closed) return { ...base, status: 'closed' };
       const scope = requestScope(30000);
@@ -185,10 +191,9 @@ export class TerminalService {
       }
       const offset = request.outputOffset ?? 0, limit = request.outputLimit ?? 2000;
       if (!Number.isInteger(offset) || offset < 0 || offset > 65536 || !Number.isInteger(limit) || limit < 1 || limit > MAX_OUTPUT_CODE_POINTS) return { status: 'invalid_request' };
-      if (request.operation === 'cancel' && op.state === 'finished' && op.cleanup === 'termination_unconfirmed' && op.ptyId && !this.closed) {
-        op.state = 'cleaning';
-        op.cleanup = await independently(() => this.terminate(op));
-        op.state = 'finished';
+      if (request.operation === 'cancel' && op.state === 'finished' &&
+        (op.cleanup === 'termination_unconfirmed' || op.cleanup === 'identity_unknown') && !this.closed) {
+        await independently(() => this.retryCleanup(op));
       } else if (request.operation === 'cancel' && op.state !== 'finished' && op.state !== 'cleaning') {
         op.cancelRequested = true; op.wake?.('cancel_requested');
       }
@@ -208,7 +213,8 @@ export class TerminalService {
     const gone = this.released.get(commandId);
     if (gone) return gone.digest === digest ? this.releasedResult(commandId, gone) : { status: 'command_id_conflict' };
     if (this.closed) return { status: 'closed', commandOutcome: 'not_submitted' };
-    if (this.active) return { status: 'busy', commandOutcome: 'not_submitted' };
+    const blocking = this.blockingCommand;
+    if (blocking) return { status: 'busy', commandOutcome: 'not_submitted', activeCommandId: blocking.commandId };
     if (this.results.size >= this.maxResults && !this.releaseOldest()) return { status: 'session_capacity', commandOutcome: 'not_submitted' };
     const op: Command = { commandId, digest, state: 'starting', commandOutcome: 'not_submitted', exitCode: null, signal: null,
       executionEnded: false, outputComplete: false, outputReadFailed: false, outputTruncated: false,
@@ -264,7 +270,11 @@ export class TerminalService {
       if (typeof value.ptyId !== 'string' || !value.ptyId || op.ptyId === value.ptyId) return;
       op.ptyId = value.ptyId;
       // Retain late identities and contain only the command whose execution was already authorized.
-      if (released && !this.closed) void independently(async () => { op.cleanup = await this.terminate(op); });
+      if (released && !this.closed && op.state === 'finished' &&
+        (op.cleanup === 'identity_unknown' || op.cleanup === 'process_not_listed')) {
+        op.cleanup = 'termination_unconfirmed';
+        void independently(() => this.retryCleanup(op));
+      }
     };
     try {
       const connection = await withWaitScope(startup, () => within(startup, () => this.connector.connect(undefined, startup.signal).then(connection => {
@@ -387,20 +397,43 @@ export class TerminalService {
     return undefined;
   }
 
+  private async retryCleanup(op: Command) {
+    op.state = 'cleaning';
+    const cleanup = await this.terminate(op);
+    // A late identity supersedes an inventory taken before we knew which PTY to check.
+    if ((cleanup === 'empty_inventory' || cleanup === 'identity_unknown') && op.ptyId) {
+      op.cleanup = await this.terminate(op);
+    } else {
+      op.cleanup = cleanup === 'empty_inventory' ? 'process_not_listed' : cleanup;
+    }
+    op.state = 'finished';
+  }
+
   private async terminate(op: Command): Promise<string> {
     const scope = createWaitScope({ timeoutMs: 30000 });
     let peer: TerminalPeer | undefined;
+    let ptyId = op.ptyId;
     try {
       ({ peer } = await withWaitScope(scope, () => within(scope, () => this.connector.connect(op.machineId, scope.signal).then(connection => {
         if (scope.stopReason()) connection.peer.close();
         return connection;
       }))));
-      try { await withWaitScope(scope, () => within(scope, () => peer!.unary('TerminatePty', { ptyId: op.ptyId }))); } catch { /* Verify despite an ambiguous termination reply. */ }
+      ptyId = op.ptyId;
+      if (!ptyId) {
+        // With no identity, only an empty inventory establishes observed absence on this VM.
+        const listed = await withWaitScope(scope, () => within(scope, () => peer!.unary('ListPtys', {})));
+        return listed.ptys === undefined || (Array.isArray(listed.ptys) && listed.ptys.length === 0)
+          ? 'empty_inventory' : 'identity_unknown';
+      }
+      try { await withWaitScope(scope, () => within(scope, () => peer!.unary('TerminatePty', { ptyId }))); } catch { /* Verify despite an ambiguous termination reply. */ }
       const listed = await withWaitScope(scope, () => within(scope, () => peer!.unary('ListPtys', {})));
       if (listed.ptys !== undefined && !Array.isArray(listed.ptys)) return 'termination_unconfirmed';
-      return (listed.ptys as unknown[] | undefined ?? []).some(value => object(value) && value.ptyId === op.ptyId)
+      return (listed.ptys as unknown[] | undefined ?? []).some(value => object(value) && value.ptyId === ptyId)
         ? 'termination_unconfirmed' : 'process_not_listed';
-    } catch (error) { return error instanceof TerminalFailure && error.code === 'machine_changed' ? 'machine_changed' : 'termination_unconfirmed'; }
+    } catch (error) {
+      if (error instanceof TerminalFailure && error.code === 'machine_changed') return 'machine_changed';
+      return ptyId ? 'termination_unconfirmed' : 'identity_unknown';
+    }
     finally { scope.dispose(); peer?.close(); }
   }
 

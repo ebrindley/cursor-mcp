@@ -22,8 +22,10 @@ function fixture(maxBytes = 65536, maxResults = 32) {
   let listener: ((event: Record<string, unknown>) => void) | undefined;
   let present = false;
   let failSpawn = false;
+  let lateSpawn: ((value: Record<string, unknown>) => void) | undefined;
   let changed = false;
   let cleanupFails = false;
+  let onNextInventory: (() => void) | undefined;
   let holdNext = false;
   let releaseConnect: (() => void) | undefined;
   // Each connect returns its own peer, as the real connector does, so a superseded one is visible.
@@ -31,12 +33,21 @@ function fixture(maxBytes = 65536, maxResults = 32) {
     const state = { closed: false };
     peers.push(state);
     const peer: TerminalPeer = {
-      async unary(method, _input, submitted) {
+      async unary(method, _input, submitted, acknowledged) {
         calls.push(method);
-        if (method === 'SpawnPty') { submitted?.(); present = true; if (failSpawn) throw new TerminalFailure('gateway_disconnected', true); return { ptyId: 'owned' }; }
+        if (method === 'SpawnPty') {
+          submitted?.(); present = true;
+          if (failSpawn) {
+            failSpawn = false; lateSpawn = acknowledged;
+            throw new TerminalFailure('gateway_disconnected', true);
+          }
+          return { ptyId: 'owned' };
+        }
         if (cleanupFails) throw new TerminalFailure('gateway_disconnected');
         if (method === 'TerminatePty') { present = false; return { success: true }; }
-        return { ptys: present ? [{ ptyId: 'owned' }] : [] };
+        const ptys = present ? [{ ptyId: 'owned' }] : [];
+        const onInventory = onNextInventory; onNextInventory = undefined; onInventory?.();
+        return { ptys };
       },
       stream(_method, input, event, signal) {
         attachments.push(input); listener = event;
@@ -50,8 +61,9 @@ function fixture(maxBytes = 65536, maxResults = 32) {
     connectSignals.push(currentRequestSignal());
     if (holdNext) { holdNext = false; await new Promise<void>(resolve => { releaseConnect = resolve; }); }
     if (connectFailures.length) { const next = connectFailures.shift()!; throw typeof next === 'string' ? new TerminalFailure(next) : next; }
-    if (changed && expected) throw new TerminalFailure('machine_changed');
-    return { machineId: 'machine-1', peer: newPeer() };
+    const machineId = changed ? 'machine-2' : 'machine-1';
+    if (expected && expected !== machineId) throw new TerminalFailure('machine_changed');
+    return { machineId, peer: newPeer() };
   } };
   const service = new TerminalService('bc-test', connector, maxBytes, maxResults);
   const request = (operation: string, commandId = 'one') => ({ operation, sessionId: service.sessionId, commandId, command: "printf 'x\ty'\nexit 7", timeoutMs: 10000 });
@@ -62,6 +74,9 @@ function fixture(maxBytes = 65536, maxResults = 32) {
     failConnect: (...codes: (string | TerminalFailure)[]) => connectFailures.push(...codes),
     holdConnect: () => { holdNext = true; }, connectHeld: () => releaseConnect !== undefined, releaseConnect: () => releaseConnect!(),
     failSpawn: () => { failSpawn = true; }, changeMachine: () => { changed = true; }, failCleanup: () => { cleanupFails = true; }, recoverCleanup: () => { cleanupFails = false; },
+    acknowledgeLateSpawn: () => { present = true; lateSpawn!({ ptyId: 'owned' }); },
+    emptyInventory: () => { present = false; },
+    onNextInventory: (callback: () => void) => { onNextInventory = callback; },
     async started() { await vi.waitFor(() => expect(listener).toBeTypeOf('function')); },
     async attached(count: number) { await vi.waitFor(() => expect(attachments).toHaveLength(count)); },
     data(data: Buffer, eventId?: string) { listener!({ ...(eventId ? { eventId } : {}), ptyData: { data: data.toString('base64') } }); },
@@ -251,7 +266,64 @@ test('Unicode byte splits and capped output retain valid pages while still obser
 test('ambiguous spawn retains its ID and never retries without known process identity', async () => {
   const f = fixture(); f.failSpawn(); await f.service.handle(f.request('execute'));
   expect(await f.finished()).toMatchObject({ commandOutcome: 'unknown', cleanup: 'identity_unknown', exitCode: null });
-  await f.service.handle(f.request('execute')); expect(f.calls).toEqual(['SpawnPty']); f.service.close();
+  expect(await f.service.handle(f.request('execute'))).toMatchObject({ state: 'finished', cleanup: 'identity_unknown' });
+  expect(await f.service.handle(f.request('reset'))).toMatchObject({ carriedResults: 1 });
+  expect(await f.service.handle(f.request('cancel'))).toMatchObject({ cleanup: 'identity_unknown' });
+  expect(await f.service.handle(f.request('execute', 'two'))).toMatchObject({ status: 'busy', activeCommandId: 'one' });
+  f.changeMachine();
+  expect(await f.service.handle(f.request('cancel'))).toMatchObject({ cleanup: 'machine_changed', commandOutcome: 'unknown' });
+  expect(f.calls).toEqual(['SpawnPty', 'ListPtys']);
+  expect(await f.service.handle(f.request('execute', 'two'))).toMatchObject({ state: 'starting' });
+  await f.started(); f.exit(); await f.finished('two'); f.service.close();
+});
+
+test('explicit cancel releases an ambiguous spawn after an empty original-machine inventory', async () => {
+  const f = fixture();
+  try {
+    f.failSpawn(); await f.service.handle(f.request('execute')); await f.finished();
+    f.emptyInventory();
+    expect(await f.service.handle(f.request('cancel'))).toMatchObject({ cleanup: 'process_not_listed', commandOutcome: 'unknown' });
+    expect(f.calls).toEqual(['SpawnPty', 'ListPtys']);
+    expect(await f.service.handle(f.request('execute', 'two'))).toMatchObject({ state: 'starting' });
+    await f.started(); f.exit(); await f.finished('two');
+  } finally { f.service.close(); }
+});
+
+test.each(['during', 'after'] as const)('an identity arriving %s empty inventory receives owned cleanup', async timing => {
+  const f = fixture();
+  try {
+    f.failSpawn(); await f.service.handle(f.request('execute')); await f.finished();
+    f.emptyInventory();
+    if (timing === 'during') f.onNextInventory(f.acknowledgeLateSpawn);
+    await f.service.handle(f.request('cancel'));
+    if (timing === 'after') {
+      f.holdConnect(); f.acknowledgeLateSpawn();
+      await vi.waitFor(() => expect(f.connectHeld()).toBe(true));
+      expect(await f.service.handle(f.request('execute', 'two'))).toMatchObject({ status: 'busy', activeCommandId: 'one' });
+      f.releaseConnect();
+    }
+    expect(await f.finished()).toMatchObject({ cleanup: 'process_not_listed', commandOutcome: 'unknown' });
+    expect(f.calls).toEqual(['SpawnPty', 'ListPtys', 'TerminatePty', 'ListPtys']);
+    expect(f.service.retention.activeCommandId).toBeNull();
+  } finally { f.service.close(); }
+});
+
+test.each(['before', 'during'] as const)('a late spawn acknowledgement %s cancel uses one cleanup and keeps admission blocked', async timing => {
+  const f = fixture();
+  try {
+    f.failSpawn(); await f.service.handle(f.request('execute')); await f.finished();
+    f.holdConnect();
+    if (timing === 'before') f.acknowledgeLateSpawn();
+    const cancelling = f.service.handle(f.request('cancel'));
+    await vi.waitFor(() => expect(f.connectHeld()).toBe(true));
+    if (timing === 'during') f.acknowledgeLateSpawn();
+    expect(await f.service.handle(f.request('execute', 'two'))).toMatchObject({ status: 'busy', activeCommandId: 'one' });
+    expect(f.calls).toEqual(['SpawnPty']);
+    f.releaseConnect(); await cancelling;
+    expect(await f.finished()).toMatchObject({ cleanup: 'process_not_listed', commandOutcome: 'unknown' });
+    expect(f.calls).toEqual(['SpawnPty', 'TerminatePty', 'ListPtys']);
+    expect(f.service.retention.activeCommandId).toBeNull();
+  } finally { f.service.close(); }
 });
 
 test.each(['cancel', 'deadline', 'changed', 'cleanup-failure'] as const)('%s reports cleanup separately from unknown command outcome', async mode => {
@@ -644,8 +716,11 @@ test.each(['backoff', 'connect', 'deadline'] as const)('%s interruption installs
  test('explicit cancel retries only unresolved cleanup after connectivity returns', async () => {
   const f = fixture(); await f.service.handle(f.request('execute')); await f.started(); f.failCleanup();
   await f.service.handle(f.request('cancel')); expect(await f.finished()).toMatchObject({ cleanup: 'termination_unconfirmed' });
+  expect(await f.service.handle(f.request('execute', 'two'))).toMatchObject({ status: 'busy', commandOutcome: 'not_submitted' });
   f.recoverCleanup(); expect(await f.service.handle(f.request('cancel'))).toMatchObject({ cleanup: 'process_not_listed', commandOutcome: 'unknown' });
-  expect(f.calls.filter(x => x === 'SpawnPty')).toHaveLength(1); f.service.close();
+  expect(f.calls.filter(x => x === 'SpawnPty')).toHaveLength(1);
+  expect(await f.service.handle(f.request('execute', 'two'))).toMatchObject({ commandId: 'two' });
+  await f.attached(2); f.exit(); await f.finished('two'); f.service.close();
 });
 
 test('explicit reset releases settled records, carries active ones, and makes old command requests invalid', async () => {
@@ -684,7 +759,7 @@ test('an unresolved cleanup result is never released, and only contiguous MCP pa
     await f.service.handle(f.request('execute')); await f.started(); f.failCleanup();
     await f.service.handle(f.request('cancel')); expect(await f.finished()).toMatchObject({ cleanup: 'termination_unconfirmed' });
     f.service.markDelivered('one', 0, 0, 0);
-    expect(await f.service.handle(f.request('execute', 'two'))).toMatchObject({ status: 'session_capacity' });
+    expect(await f.service.handle(f.request('execute', 'two'))).toMatchObject({ status: 'busy', activeCommandId: 'one' });
     f.recoverCleanup(); await f.service.handle(f.request('cancel'));
     await f.service.handle(f.request('execute', 'two')); await f.attached(2);
     f.data(Buffer.from('v'.repeat(3000))); f.exit(); await f.finished('two');
