@@ -1013,6 +1013,28 @@ describe("cursor_create_agent", () => {
     expect(body).not.toHaveProperty("repos");
   });
 
+  it("keeps the launch receipt and reports abbreviated repository readback at the minimum response budget", async () => {
+    const repos = Array.from({ length: 20 }, (_, i) => ({
+      url: `https://github.com/ExampleOrg/repository-${i}`, startingRef: "main",
+    }));
+    const agentId = "bc-12345678-1234-4123-8123-123456789abc";
+    fetchImpl.mockResolvedValue(json(createdPayload({ id: agentId, repos })));
+    const client = await connect(fetchImpl, { ...policy(["*"], repos.map(r => r.url)), maxResponseBytes: 1024 });
+    const result = await client.callTool({ name: "cursor_create_agent", arguments: { repos, agentId, prompt: "inspect" } });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      agentId, requestedAgentId: agentId, agentIdHonored: true, runId: "run-1", status: "CREATING",
+      targetVerified: true, sourcePinned: true, repositoryCount: 20, repositoryDetailsTruncated: true,
+    });
+    expect(Buffer.byteLength(JSON.stringify(result.structuredContent))).toBeLessThanOrEqual(1024);
+    const receipt = result.structuredContent as { repos: string[]; repoDetails: { url: string }[]; startingRefs: { repoUrl: string; startingRef: string }[] };
+    expect(receipt.repos).toEqual(repos.slice(0, receipt.repos.length).map(r => r.url));
+    expect(receipt.repoDetails).toEqual(repos.slice(0, receipt.repos.length));
+    expect(receipt.startingRefs).toEqual(receipt.repos.map(repoUrl => ({ repoUrl, startingRef: "main" })));
+  });
+
   it("sends multiple repositories when every target is allowed", async () => {
     fetchImpl.mockResolvedValue(
       json(

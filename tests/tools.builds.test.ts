@@ -17,7 +17,7 @@ async function invoke(name: string, args: Record<string, unknown>, responses: Re
   const client = new CursorClient({ apiKey: "test", baseUrl: "https://api.example.test", fetchImpl: async (input, init) => {
     expect(init?.method ?? "GET").toBe("GET");
     const url = new URL(String(input)); calls.push(url.pathname + url.search);
-    const response = responses[url.pathname];
+    const response = responses[url.pathname + url.search] ?? responses[url.pathname];
     const body = typeof response === "function" ? await response(init) : response;
     return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   } });
@@ -86,6 +86,68 @@ describe("public Build reads", () => {
       expect(result.structuredContent).toMatchObject({ status: "PENDING", build: { status: "IN_PROGRESS" }, monitor: { attempts: 1, deadlineExceeded: true } });
     } finally { vi.useRealTimers(); }
   });
+  it("preserves every Build identity and continuation at the minimum response budget", async () => {
+    const path = "/v1/environments/env-alpha/builds";
+    const rows = Array.from({ length: 10 }, (_, i) => ({ ...build, id: `bld-${i}-${"a".repeat(125)}` }));
+    const final = { ...build, id: "bld-final" };
+    const responses = { ...base, [path]: { items: rows, nextCursor: "upstream-page-2" },
+      [path + "?cursor=upstream-page-2"]: { items: [final] } };
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i <= rows.length + 1; i++) {
+      const { result } = await invoke("cursor_list_builds", { environment: "alpha", cursor }, responses,
+        { ...policy, maxResponseBytes: 1024 });
+      expect(result.isError).toBeFalsy();
+      const data = result.structuredContent as { builds: { buildId: string; status: string }[]; page: { hasMore: boolean; returned: number }; nextCursor?: string };
+      expect(Buffer.byteLength(JSON.stringify(data))).toBeLessThanOrEqual(1024);
+      expect(data.page).toMatchObject({ hasMore: Boolean(data.nextCursor), returned: data.builds.length });
+      expect(data.builds.length).toBeGreaterThan(0);
+      for (const row of data.builds) {
+        expect(row.status).toBe("SUCCEEDED");
+        seen.push(row.buildId);
+      }
+      if (!data.nextCursor) break;
+      expect(data.nextCursor).not.toBe(cursor);
+      cursor = data.nextCursor;
+    }
+    expect(seen).toEqual([...rows, final].map(row => row.id));
+  });
+
+  it("retains draft and trigger evidence in an oversized compact Build row", async () => {
+    const { result } = await invoke("cursor_list_builds", { environment: "alpha" }, {
+      ...base, "/v1/environments/env-alpha/builds": { items: [{ ...build, updatedAt: "x".repeat(1500) }] },
+    }, { ...policy, maxResponseBytes: 1024 });
+    expect(result.structuredContent).toMatchObject({ builds: [expect.objectContaining({
+      buildId: build.id, compact: true, isDraft: true, triggerType: "MANUAL",
+    })] });
+  });
+
+  it("continues within the same Build rows when the upstream token rotates", async () => {
+    const path = "/v1/environments/env-alpha/builds";
+    const items = Array.from({ length: 10 }, (_, i) => ({ ...build, id: "bld-" + i }));
+    const read = (nextCursor: string, cursor?: string) => invoke("cursor_list_builds", { environment: "alpha", cursor },
+      { ...base, [path]: { items, nextCursor } }, { ...policy, maxResponseBytes: 1024 });
+    const first = await read("token-one");
+    const cursor = (first.result.structuredContent as { nextCursor: string }).nextCursor;
+    const resumed = await read("token-two", cursor);
+    expect(resumed.result.isError).not.toBe(true);
+    expect(resumed.result.structuredContent).toHaveProperty("builds");
+  });
+
+  it("refuses a shifted continuation at the minimum response budget", async () => {
+    const path = "/v1/environments/env-alpha/builds";
+    const rows = Array.from({ length: 10 }, (_, i) => ({ ...build, id: `bld-${i}` }));
+    const configured = { ...policy, maxResponseBytes: 1024 };
+    const read = (items: typeof rows, cursor?: string) => invoke("cursor_list_builds", { environment: "alpha", cursor },
+      { ...base, [path]: { items } }, configured);
+    const first = await read(rows);
+    const cursor = (first.result.structuredContent as { nextCursor: string }).nextCursor;
+    expect(cursor).toBeTruthy();
+    const shifted = await read(rows.reverse(), cursor);
+    expect(shifted.result.isError).toBe(true);
+    expect(shifted.result.content).toEqual([expect.objectContaining({ text: expect.stringContaining("Restart cursor_list_builds") })]);
+  });
+
   it("reads filtered Build pages and preserves continuation", async () => {
     const { result, calls } = await invoke("cursor_list_builds", { environment: "alpha", statuses: ["FAILED"], cursor: "page2" }, {
       ...base, "/v1/environments/env-alpha/builds": { items: [build], nextCursor: "page3" },

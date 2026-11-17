@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CursorCancelledError, seg, type CursorClient } from "../client.js";
@@ -9,7 +10,8 @@ import { PolicyError, CursorTransportError } from "../errors.js";
 import { buildOutcome, isTerminalBuild } from "../environment-operations.js";
 import { defineTool } from "./register.js";
 import { READ } from "./annotations.js";
-import { ok } from "./result.js";
+import { sanitize } from "../untrusted.js";
+import { fitsStructuredResponse, ok } from "./result.js";
 
 const BuildSchema = z.object({
   id: z.string(), environmentId: z.string(), status: z.string(), trigger: z.string(),
@@ -44,6 +46,25 @@ const Id = z.string().trim().min(1).max(200);
 const Target = { environment: Id.optional(), environmentPublicId: Id.optional() };
 type TargetArgs = { environment?: string; environmentPublicId?: string };
 
+// Upstream cursors stay opaque. Only a split page needs a local position and a
+// fingerprint of the result set, so an intervening insertion cannot shift it.
+const CURSOR_PREFIX = "cursor-mcp:builds:";
+const UpstreamCursor = z.string().min(1).max(512);
+const Slice = z.tuple([UpstreamCursor.nullable(), z.number().int().nonnegative(), z.string()]);
+
+function buildCursor(upstream: string | undefined, offset: number, fingerprint: string): string {
+  return CURSOR_PREFIX + Buffer.from(JSON.stringify([upstream ?? null, offset, fingerprint])).toString("base64url");
+}
+
+function readBuildCursor(input?: string): z.infer<typeof Slice> {
+  if (input?.startsWith(CURSOR_PREFIX)) {
+    try {
+      return Slice.parse(JSON.parse(Buffer.from(input.slice(CURSOR_PREFIX.length), "base64url").toString()));
+    } catch { /* An existing caller may have a plain upstream token with this prefix. */ }
+  }
+  return [UpstreamCursor.nullable().parse(input ?? null), 0, ""];
+}
+
 export function registerBuildReadTools(server: McpServer, client: CursorClient, policy: Policy): string[] {
   const profile = activeProfile(policy), names: string[] = [];
   const target = (args: TargetArgs) => resolveEnvironmentTarget(client, profile, args);
@@ -67,19 +88,54 @@ export function registerBuildReadTools(server: McpServer, client: CursorClient, 
     config: {
       title: "Cursor Cloud: list Builds",
       description: "Read environment Builds through the public API. Follow nextCursor, including on filtered empty pages. No agent run is launched.",
-      inputSchema: { ...Target, cursor: z.string().min(1).max(512).optional(), statuses: z.array(z.string()).optional() },
+      inputSchema: { ...Target, cursor: z.string().min(1).max(4096).optional(), statuses: z.array(z.string()).optional() },
       outputSchema: { status: z.string(), authority: z.string(), builds: z.array(Block), page: Block, nextCursor: z.string().optional() },
       annotations: READ,
     },
     handler: async (args: TargetArgs & { cursor?: string; statuses?: string[] }) => {
       const environment = await target(args);
-      const page = await client.get(`/v1/environments/${seg(environment.id)}/builds`, BuildPageSchema, { query: { cursor: args.cursor } });
+      const [upstream, offset, expectedPage] = readBuildCursor(args.cursor);
+      const page = await client.get(`/v1/environments/${seg(environment.id)}/builds`, BuildPageSchema, { query: { cursor: upstream ?? undefined } });
       const builds = page.items.map(b => view(b, environment.id)).filter(b => !args.statuses?.length || args.statuses.includes(b.status));
+      const fingerprint = createHash("sha256").update(JSON.stringify([
+        environment.id, builds.map(row => row.buildId),
+      ])).digest("base64url");
+      if (offset && (expectedPage !== fingerprint || offset >= builds.length)) {
+        throw new Error("The Build page changed since the previous read. Restart cursor_list_builds without a cursor.");
+      }
+
+      const upstreamNext = page.nextCursor && UpstreamCursor.parse(page.nextCursor);
+      const next = upstreamNext && (upstreamNext.startsWith(CURSOR_PREFIX) || sanitize(upstreamNext) !== upstreamNext)
+        ? buildCursor(upstreamNext, 0, "") : upstreamNext;
+      type BuildRow = { buildId: string; status: string; [field: string]: unknown };
+      const resultPage = (rows: BuildRow[], nextCursor?: string) => ({
+        status: "BUILDS_LISTED", authority: "api-key", builds: rows,
+        page: { hasMore: Boolean(nextCursor), returned: rows.length }, ...(nextCursor ? { nextCursor } : {}),
+      });
+      let structured = resultPage(builds.slice(offset), next);
+      if (!fitsStructuredResponse(structured, policy.maxResponseBytes)) {
+        const rows: BuildRow[] = [];
+        for (let index = offset; index < builds.length; index++) {
+          const row = builds[index]!;
+          const continuation = index + 1 === builds.length ? next : buildCursor(upstream ?? undefined, index + 1, fingerprint);
+          let candidate = resultPage([...rows, row], continuation);
+          if (!fitsStructuredResponse(candidate, policy.maxResponseBytes)) {
+            if (rows.length) break;
+            // A single unusually wide row still has an exact-detail lookup.
+            const { buildId, environmentPublicId, status, isDraft, triggerType, createdAtMs, completedAtMs } = row;
+            candidate = resultPage([{ buildId, environmentPublicId, status, isDraft, triggerType,
+              ...(createdAtMs === undefined ? {} : { createdAtMs }),
+              ...(completedAtMs === undefined ? {} : { completedAtMs }), compact: true }], continuation);
+            if (!fitsStructuredResponse(candidate, policy.maxResponseBytes)) break;
+          }
+          structured = candidate;
+          rows.push(candidate.builds[candidate.builds.length - 1]!);
+        }
+        if (!rows.length) throw new Error("maxResponseBytes cannot hold the Build identity and continuation. Increase maxResponseBytes and retry the same cursor.");
+      }
       return ok({ source: "GET /v1/environments/{id}/builds", policy,
-        text: builds.map(b => `${b.buildId}  ${b.status}`).join("\n") || "(no matching Builds on this page)",
-        structured: { status: "BUILDS_LISTED", authority: "api-key", builds,
-          page: { hasMore: Boolean(page.nextCursor), returned: builds.length },
-          ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) },
+        text: structured.builds.map(b => `${b.buildId}  ${b.status}`).join("\n") || "(no matching Builds on this page)",
+        structured,
       });
     },
   })) names.push("cursor_list_builds");

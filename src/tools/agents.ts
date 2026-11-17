@@ -82,7 +82,7 @@ import {
 import { capBytes, sanitize } from "../untrusted.js";
 import { CANCEL, CREATE, READ } from "./annotations.js";
 import { defineTool } from "./register.js";
-import { ok, structuredCost, type FencedField } from "./result.js";
+import { fitsStructuredResponse, ok, structuredCost, type FencedField } from "./result.js";
 import type { TerminalStatusProbe } from "./terminal.js";
 
 const FollowUpSchema = z.enum(["accepted", "refused", "unknown"]);
@@ -1185,6 +1185,9 @@ export function registerAgentTools(
         startingRefs: z.array(
           z.object({ repoUrl: z.string(), startingRef: z.string() }),
         ),
+        detailsTruncated: z.boolean().optional().describe("The byte budget omitted readback details."),
+        repositoryCount: z.number().int().optional().describe("Full repository count when the receipt is abbreviated."),
+        repositoryDetailsTruncated: z.boolean().optional().describe("The repository arrays show only a prefix."),
         sourcePinned: z.boolean().optional(),
         environment: z.string().optional(),
         workOnCurrentBranch: z.boolean().optional(),
@@ -1335,11 +1338,69 @@ export function registerAgentTools(
           : returnedSubagents.length === requestedSubagentNames.length &&
             requestedSubagentNames.every((name) =>
               returnedSubagents.some((returned) => returned.name === name));
+      const receipt = {
+        agentId: created.agent.id,
+        runId: created.run.id,
+        status: created.run.status,
+        agentStatus: created.agent.status,
+        followUp: followUpAcceptance(created.agent.status),
+        targetVerified: true,
+        environmentVerified: Boolean(environment),
+        requestedAgentId: agentId,
+        agentIdHonored,
+        ...(sourcePinned === undefined ? {} : { sourcePinned }),
+        ...(created.agent.workOnCurrentBranch === undefined
+          ? {}
+          : { workOnCurrentBranch: created.agent.workOnCurrentBranch }),
+        ...(metadataVerified === undefined ? {} : { metadataVerified }),
+        ...(skipReviewerRequest === undefined ? {} : { skipReviewerRequest }),
+        ...(skipReviewerRequestVerified === undefined ? {} : { skipReviewerRequestVerified }),
+        ...(customSubagentsVerified === undefined ? {} : { customSubagentsVerified }),
+        ...(images === undefined ? {} : { imageCount: images.count }),
+      };
+      const echoes = {
+        ...(model === undefined ? {} : { modelRequested: model }),
+        ...(environment ? { environment } : {}),
+        ...(created.agent.metadata === undefined
+          ? {}
+          : { metadata: created.agent.metadata }),
+        ...(requestedSubagentNames === undefined
+          ? {}
+          : { customSubagentsRequested: requestedSubagentNames }),
+      };
+      const details = repoDetails(created.agent);
+      const full = { ...receipt, url: created.agent.url, ...echoes,
+        repos: details.map(repo => repo.url), repoDetails: details, startingRefs };
+      let structured: Record<string, unknown> = full;
+      const fits = (value: Record<string, unknown>) => fitsStructuredResponse(value, policy.maxResponseBytes);
+      if (!fits(full)) {
+        // Preserve the identities and verification outcomes of the completed POST.
+        // Only whole, corresponding repository entries can enter the reduced receipt.
+        const compact = { ...receipt, url: "", detailsTruncated: true,
+          repositoryCount: details.length, repositoryDetailsTruncated: false,
+          repos: [] as string[], repoDetails: [] as RepoDetailOut[], startingRefs: [] as typeof startingRefs };
+        if (fits({ ...compact, url: created.agent.url })) compact.url = created.agent.url;
+        for (const repo of details) {
+          const ref = repo.startingRef === undefined ? [] : [{ repoUrl: repo.url, startingRef: repo.startingRef }];
+          const candidate = { ...compact, repos: [...compact.repos, repo.url],
+            repoDetails: [...compact.repoDetails, repo], startingRefs: [...compact.startingRefs, ...ref] };
+          if (!fits(candidate)) break;
+          compact.repos = candidate.repos;
+          compact.repoDetails = candidate.repoDetails;
+          compact.startingRefs = candidate.startingRefs;
+        }
+        compact.repositoryDetailsTruncated = compact.repos.length < details.length;
+        structured = compact;
+        for (const [key, value] of Object.entries(echoes)) {
+          if (fits({ ...structured, [key]: value })) structured[key] = value;
+        }
+      }
       return ok({
         source: "POST /v1/agents",
         text: [
           `agent=${created.agent.id} run=${created.run.id} status=${created.run.status}`,
           created.agent.url,
+          ...(structured.detailsTruncated ? ["Launch receipt abbreviated to fit maxResponseBytes."] : []),
           ...(!environment ? ["Environment unknown in launch readback; image cleanliness is unverified."] : []),
           ...(agentIdHonored
             ? []
@@ -1360,38 +1421,7 @@ export function registerAgentTools(
             : []),
           ...(images === undefined ? [] : [`images=${images.count}`]),
         ].join("\n"),
-        structured: {
-          agentId: created.agent.id,
-          runId: created.run.id,
-          status: created.run.status,
-          url: created.agent.url,
-          agentStatus: created.agent.status,
-          followUp: followUpAcceptance(created.agent.status),
-          repos: (created.agent.repos ?? []).map((repo) => repo.url),
-          repoDetails: repoDetails(created.agent),
-          targetVerified: true,
-          environmentVerified: Boolean(environment),
-          ...(model === undefined ? {} : { modelRequested: model }),
-          requestedAgentId: agentId,
-          agentIdHonored,
-          startingRefs,
-          ...(sourcePinned === undefined ? {} : { sourcePinned }),
-          ...(environment ? { environment } : {}),
-          ...(created.agent.workOnCurrentBranch === undefined
-            ? {}
-            : { workOnCurrentBranch: created.agent.workOnCurrentBranch }),
-          ...(created.agent.metadata === undefined
-            ? {}
-            : { metadata: created.agent.metadata }),
-          ...(metadataVerified === undefined ? {} : { metadataVerified }),
-          ...(skipReviewerRequest === undefined ? {} : { skipReviewerRequest }),
-          ...(skipReviewerRequestVerified === undefined ? {} : { skipReviewerRequestVerified }),
-          ...(requestedSubagentNames === undefined
-            ? {}
-            : { customSubagentsRequested: requestedSubagentNames }),
-          ...(customSubagentsVerified === undefined ? {} : { customSubagentsVerified }),
-          ...(images === undefined ? {} : { imageCount: images.count }),
-        },
+        structured,
         policy,
       });
     },

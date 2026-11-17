@@ -80,8 +80,8 @@ grammar.
 ## Monitoring
 
 `cursor_get_build` reads an exact Build through REST and optionally polls it.
-`cursor_list_builds` returns one API page; follow `nextCursor` even when a status
-filter leaves the page empty. See [Public Build reads](reference.md#public-build-reads).
+`cursor_list_builds` returns as many Builds from an API page as fit the response budget.
+Follow `nextCursor` even when a status filter leaves the page empty. See [Public Build reads](reference.md#public-build-reads).
 
 The delegated `list-environment-builds` has **no `buildId` filter**. Its parameters are
 `statuses`, `createdAfter`, `createdBefore`, `cursor`, and `limit` (default 25,

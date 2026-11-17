@@ -203,6 +203,12 @@ function jsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
+/** Check both the sanitizer budget and the serialized size before promising a complete receipt or page. */
+export function fitsStructuredResponse(value: Record<string, unknown>, maxBytes: number): boolean {
+  const sanitized = sanitizeDeep(value, maxBytes);
+  return !sanitized.truncated && jsonBytes(sanitized.value) <= maxBytes;
+}
+
 /**
  * Wrap `field` so its serialized envelope fits in `room` bytes, or return
  * undefined when even an empty envelope does not.
