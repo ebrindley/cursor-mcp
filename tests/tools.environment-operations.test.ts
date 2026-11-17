@@ -343,6 +343,8 @@ describe("delegation lifecycle", () => {
     });
     expect(result.isError).toBe(true);
     expect(result.text).toContain("not issued by this server process");
+    expect(result.text).toContain("cursor_get_run");
+    expect(result.text).not.toContain("start a new bounded delegation");
     expect(starts).toEqual([]);
     expect(collected).toEqual([]);
   });

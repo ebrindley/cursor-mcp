@@ -364,7 +364,8 @@ export async function collectMission(args: {
     const binding = bindings.get(bindingKey);
     if (binding === undefined) {
       throw new PolicyError(
-        "resume handle was not issued by this server process; start a new bounded delegation",
+        "This resume handle is no longer available or was not issued by this server process. " +
+          "Inspect the existing run with cursor_get_run. For a Build trigger, reconcile the environment with cursor_list_builds before considering another launch.",
       );
     }
     if (

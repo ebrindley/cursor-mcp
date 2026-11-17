@@ -167,12 +167,13 @@ describe("launching a delegate", () => {
     expect(post).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["contract", "transport", "rejected"])("retains requested identity after a %s launch failure without replay", async kind => {
+  it.each(["contract", "transport", "rejected", "404", "503"])("retains requested identity after a %s launch failure without replay", async kind => {
     let requestedId = "", calls = 0;
     const fetchImpl: typeof fetch = async (_input, init) => {
       calls++;
       requestedId = JSON.parse(String(init?.body)).agentId;
       if (kind === "transport") throw new TypeError("fetch failed");
+      if (kind === "404" || kind === "503") return json({ error: { message: "launch unavailable" } }, Number(kind));
       return kind === "rejected" ? json({ error: { message: "forbidden" } }, 403)
         : json({ agent: agentPayload().agent, run: { id: "run-1" } });
     };
