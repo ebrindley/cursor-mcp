@@ -1297,9 +1297,12 @@ export function registerAgentTools(
       const agentIdHonored = created.agent.id.toLowerCase() === agentId;
       try {
         assertLaunchReadback(launch, created.agent);
+        const inPlace = launch.kind === "repository" && launch.workOnCurrentBranch === true;
         sourcePinned = requestedRefs.length === 0 ? undefined : requestedRefs.every((requested) =>
           startingRefs.some((reported) => repoKey(reported.repoUrl) === repoKey(requested.url) &&
-            reported.startingRef === requested.startingRef));
+            (inPlace
+              ? branchName(reported.startingRef) === branchName(requested.startingRef)
+              : reported.startingRef === requested.startingRef)));
         assertAgentAccess(profile, created.agent);
         scope.remember(created.agent);
       } catch (error) {
@@ -2079,18 +2082,24 @@ function assertLaunchReadback(
     );
   }
 
-  // A requested pull request must come back on the same repository. Unlike a
-  // startingRef, which is reported as unconfirmed, a dropped or different PR
-  // means the agent would push somewhere other than where it was pointed, so
-  // the launch is failed (and cancelled by the caller) rather than reported.
+  // Check explicit push destinations before allowing the run to continue.
   for (const requested of launch.repos) {
-    if (requested.prUrl === undefined) continue;
     const key = repoKey(requested.url);
-    const readBack = reported.find((repo) => repoKey(repo.url) === key)?.prUrl;
-    if (readBack === undefined || readBack.toLowerCase() !== requested.prUrl.toLowerCase()) {
+    const readBack = reported.find((repo) => repoKey(repo.url) === key);
+    if (requested.prUrl !== undefined && readBack?.prUrl?.toLowerCase() !== requested.prUrl.toLowerCase()) {
       throw new CursorContractError(
         `agent ${agent.id} did not read back prUrl ${requested.prUrl} on ${key}` +
-          `${readBack === undefined ? "" : ` (reported ${readBack})`}; the pull request target is not confirmed`,
+          `${readBack?.prUrl === undefined ? "" : ` (reported ${readBack.prUrl})`}; the pull request target is not confirmed`,
+      );
+    }
+    if (
+      launch.workOnCurrentBranch === true &&
+      requested.startingRef !== undefined &&
+      readBack?.startingRef !== undefined &&
+      branchName(readBack.startingRef) !== branchName(requested.startingRef)
+    ) {
+      throw new CursorContractError(
+        `agent ${agent.id} read back startingRef ${readBack.startingRef} on ${key} for an in-place launch targeting ${requested.startingRef}`,
       );
     }
   }
@@ -2100,4 +2109,13 @@ function assertLaunchReadback(
       `agent ${agent.id} did not read back workOnCurrentBranch=true; source pinning is not claimed`,
     );
   }
+  if (launch.workOnCurrentBranch === false && agent.workOnCurrentBranch === true) {
+    throw new CursorContractError(
+      `agent ${agent.id} read back workOnCurrentBranch=true when an in-place launch was explicitly disabled`,
+    );
+  }
+}
+
+function branchName(ref: string): string {
+  return ref.replace(/^refs\/heads\//, "");
 }

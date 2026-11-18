@@ -1179,7 +1179,11 @@ describe("cursor_create_agent", () => {
     expect(text(result)).toContain("bc-1");
   });
 
-  it("sends workOnCurrentBranch only when a startingRef can honor it, and echoes it on readback", async () => {
+  it.each([
+    ["main", true],
+    ["refs/heads/main", true],
+    [undefined, false],
+  ] as const)("sends workOnCurrentBranch and reports source pinning for ref %s", async (ref, sourcePinned) => {
     fetchImpl.mockResolvedValue(
       json(
         createdPayload({
@@ -1187,7 +1191,7 @@ describe("cursor_create_agent", () => {
           repos: [
             {
               url: "https://github.com/ExampleOrg/ExampleRepo",
-              startingRef: "main",
+              startingRef: ref,
             },
           ],
         }),
@@ -1205,7 +1209,7 @@ describe("cursor_create_agent", () => {
     });
     expect(result.structuredContent).toMatchObject({
       workOnCurrentBranch: true,
-      sourcePinned: true,
+      sourcePinned,
     });
     const body = JSON.parse(
       String((fetchImpl.mock.calls[0]![1] as RequestInit).body),
@@ -1258,6 +1262,33 @@ describe("cursor_create_agent", () => {
     });
     expect(result.isError).toBe(true);
     expect(text(result)).toContain("source pinning is not claimed");
+  });
+
+  it.each([
+    [true, true, "other", "read back startingRef other"],
+    [false, true, "main", "in-place launch was explicitly disabled"],
+  ] as const)("cancels on an explicit in-place contradiction (%s, %s, %s)", async (requested, reported, ref, message) => {
+    fetchImpl.mockResolvedValueOnce(json(createdPayload({
+      workOnCurrentBranch: reported,
+      repos: [{ url: "https://github.com/ExampleOrg/ExampleRepo", startingRef: ref }],
+    }))).mockResolvedValueOnce(json({ id: "run-1" }));
+    const client = await connect(fetchImpl, policy(["*"]));
+    const result = await client.callTool({
+      name: "cursor_create_agent",
+      arguments: {
+        repo: "ExampleOrg/ExampleRepo",
+        startingRef: "main",
+        workOnCurrentBranch: requested,
+        prompt: "patch main",
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain(message);
+    expect(text(result)).toContain("cancellation was requested");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(new URL(String(fetchImpl.mock.calls[1]![0])).pathname).toBe("/v1/agents/bc-1/runs/run-1/cancel");
+    expect((fetchImpl.mock.calls[1]![1] as RequestInit).method).toBe("POST");
   });
 
   it("echoes metadata only when Cursor reads it back", async () => {
