@@ -138,9 +138,9 @@ most one Build. Every one of these stops it before a VM exists:
 | `STALE_TOOLCHAIN` with `confirm: true` | Exactly one draft Build |
 
 The dispatch reuses the same `trigger-build` mission as `cursor_trigger_build`, so
-every rule there still holds: one call, **no retry** — the trigger has no
-idempotency key — and attribution by exact returned `buildId` or by a single
-baseline difference, never by recency.
+every rule there still holds: one call, **no retry** after an unknown outcome,
+and attribution by the exact returned `buildId`. New rows without a trigger
+receipt are candidates for reconciliation.
 
 ### What a refresh does and does not do
 

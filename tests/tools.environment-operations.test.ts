@@ -563,7 +563,7 @@ describe("cursor_trigger_build", () => {
     expect(result.text).toContain("outcome is unknown");
   });
 
-  it("adopts the returned buildId and reads its row back independently", async () => {
+  it("adopts the returned buildId and matches its delegated row", async () => {
     const { runner, starts } = reporting({
       mission: "trigger-build",
       environmentInfo,

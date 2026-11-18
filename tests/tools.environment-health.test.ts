@@ -427,6 +427,21 @@ describe("cursor_refresh_environment_toolchain", () => {
     expect(JSON.stringify(result.structured)).toContain("Do not trigger another Build");
   });
 
+  it("preserves unknown dispatch in the refresh result when the delegate reports no dispatch", async () => {
+    const { runner } = reporting({
+      mission: "trigger-build",
+      environmentInfo: TRIGGER_REPORT.environmentInfo,
+      triggerDispatched: false,
+      precondition: "another run is active",
+    });
+    const result = await invoke(WRITE, runner, "cursor_refresh_environment_toolchain", {
+      environment: ENV_NAME, ...DRIFTED_ARGS, confirm: true, waitMs: 1,
+    });
+    expect(result.structured.status).toBe("NOT_ACCEPTED_UNKNOWN");
+    expect(result.structured.refresh).toMatchObject({ dispatched: null });
+    expect(result.text).toContain("Do not trigger another Build");
+  });
+
   it("fails closed when an adopted trigger does not prove draft status", async () => {
     const { runner, starts } = reporting({
       ...TRIGGER_REPORT,

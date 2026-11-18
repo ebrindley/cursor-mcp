@@ -982,8 +982,7 @@ export function registerEnvironmentOperationTools(
           ? undefined
           : projectEnvironment(report.environmentInfo, identity.reported);
 
-      // Independent readback for the adopted id. The trigger result is delegated
-      // prose plus a JSON body; the Build row is what proves the Build exists.
+      // Match the rows in the delegated report to the exact trigger result.
       const monitor =
         attribution.buildId === undefined
           ? undefined
@@ -1002,6 +1001,7 @@ export function registerEnvironmentOperationTools(
         text: [
           `${attribution.status}  build=${attribution.buildId ?? "(none adopted)"}  dispatched=${attribution.dispatched}`,
           attribution.reason,
+          ...(attribution.status === "ADOPTED" ? [] : attribution.nextSteps),
           ...(monitor === undefined ? [] : [`${monitor.status}: ${monitor.reason}`]),
           ...(monitor?.build === undefined ? [] : [buildLine(monitor.build)]),
         ].join("\n"),

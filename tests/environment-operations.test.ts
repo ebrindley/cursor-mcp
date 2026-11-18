@@ -396,22 +396,37 @@ describe("trigger attribution", () => {
     expect(result.isDraft).toBe(true);
   });
 
-  it("requires an observed baseline before attributing a Build by difference", () => {
+  it("requires an observed baseline before reporting reconciliation candidates", () => {
     const evidence = { trigger: {}, rows: [row({ buildId: "bld-only" })], otherActiveRuns: 0 };
-    expect(attribute(evidence).buildId).toBeUndefined();
-    expect(attribute({ ...evidence, baselineBuildIds: [] }).buildId).toBe("bld-only");
+    expect(attribute(evidence).candidates).toBeUndefined();
+    expect(attribute({ ...evidence, baselineBuildIds: [] }).candidates).toEqual(["bld-only"]);
   });
 
-  it("adopts exactly one row absent from the baseline when no id came back", () => {
+  it.each([undefined, -1, 0, 0.5, 2, Number.NaN])(
+    "keeps a lone new row as a candidate with active-run count %s",
+    (otherActiveRuns) => {
+      const result = attribute({
+        trigger: {},
+        baselineBuildIds: ["bld-1", "bld-2"],
+        rows: [row({ buildId: "bld-new" }), row({ buildId: "bld-1" })],
+        otherActiveRuns,
+      });
+      expect(result.status).toBe("ATTRIBUTION_AMBIGUOUS");
+      expect(result.buildId).toBeUndefined();
+      expect(result.candidates).toEqual(["bld-new"]);
+      expect(result.nextSteps.join(" ")).toContain("Do not trigger another Build");
+    },
+  );
+
+  it.each([[false, true], [true, false]] as const)("keeps a non-draft response as a candidate (%s, %s)", (triggerDraft, rowDraft) => {
     const result = attribute({
-      trigger: {},
-      baselineBuildIds: ["bld-1", "bld-2"],
-      rows: [row({ buildId: "bld-new" }), row({ buildId: "bld-1" })],
-      otherActiveRuns: 0,
+      trigger: { buildId: "bld-new", isDraft: triggerDraft },
+      rows: [row({ buildId: "bld-new", isDraft: rowDraft })],
     });
-    expect(result.status).toBe("ADOPTED");
-    expect(result.buildId).toBe("bld-new");
-    expect(result.source).toBe("baseline-difference");
+    expect(result.status).toBe("ATTRIBUTION_AMBIGUOUS");
+    expect(result.buildId).toBeUndefined();
+    expect(result.candidates).toEqual(["bld-new"]);
+    expect(result.reason).toContain("non-draft");
   });
 
   it("does not adopt a returned id that was already in the baseline", () => {
@@ -422,37 +437,6 @@ describe("trigger attribution", () => {
     expect(result.status).toBe("ATTRIBUTION_AMBIGUOUS");
     expect(result.buildId).toBeUndefined();
     expect(result.nextSteps.join(" ")).toContain("Do not trigger another Build");
-  });
-
-  it.each([-1, 0.5, Number.NaN])("does not attribute by difference with invalid active-run count %s", (otherActiveRuns) => {
-    const result = attribute({
-      trigger: {}, baselineBuildIds: ["bld-old"],
-      rows: [row({ buildId: "bld-new" })], otherActiveRuns,
-    });
-    expect(result.status).toBe("ATTRIBUTION_AMBIGUOUS");
-    expect(result.buildId).toBeUndefined();
-  });
-
-  it("will not attribute by difference when active-run evidence is missing", () => {
-    const result = attribute({
-      trigger: {},
-      baselineBuildIds: ["bld-1"],
-      rows: [row({ buildId: "bld-new" })],
-    });
-    expect(result.status).toBe("ATTRIBUTION_AMBIGUOUS");
-    expect(result.reason).toContain("did not attest");
-  });
-
-  it("will not attribute a single new row while another run was active", () => {
-    const result = attribute({
-      trigger: {},
-      baselineBuildIds: ["bld-1"],
-      rows: [row({ buildId: "bld-new" })],
-      otherActiveRuns: 2,
-    });
-    expect(result.status).toBe("ATTRIBUTION_AMBIGUOUS");
-    expect(result.buildId).toBeUndefined();
-    expect(result.reason).toContain("2 other run(s)");
   });
 
   it("fails closed rather than adopting by recency when two rows are new", () => {
@@ -480,17 +464,14 @@ describe("trigger attribution", () => {
     expect(result.nextSteps.join(" ")).toContain("Do not trigger another Build");
   });
 
-  it("separates a mission that stopped before triggering from one that wrote", () => {
-    const unmet = attribute({
+  it.each([undefined, "a baseline Build row is still IN_PROGRESS"])("keeps a delegate's no-dispatch report unverified (%s)", (precondition) => {
+    const result = attribute({
       dispatched: false,
-      precondition: "a baseline Build row is still IN_PROGRESS",
+      precondition,
     });
-    expect(unmet.status).toBe("PRECONDITION_UNMET");
-    expect(unmet.dispatched).toBe(false);
-
-    const notDispatched = attribute({ dispatched: false });
-    expect(notDispatched.status).toBe("NOT_DISPATCHED");
-    expect(notDispatched.nextSteps.join(" ")).toContain("safe to retry");
+    expect(result.status).toBe("NOT_ACCEPTED_UNKNOWN");
+    expect(result.dispatched).toBeNull();
+    expect(result.nextSteps.join(" ")).toContain("Do not trigger another Build");
   });
 
   it("never treats missing or contradictory dispatch evidence as safe to retry", () => {
@@ -501,6 +482,7 @@ describe("trigger attribution", () => {
 
     const contradictory = attribute({ dispatched: false, trigger: { buildId: "bld-new" } });
     expect(contradictory.status).toBe("NOT_ACCEPTED_UNKNOWN");
+    expect(contradictory.candidates).toEqual(["bld-new"]);
     expect(contradictory.nextSteps.join(" ")).toContain("Do not trigger another Build");
 
     const contradictoryStop = attribute({

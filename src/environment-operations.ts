@@ -935,9 +935,9 @@ export type TriggerStatus =
 export interface TriggerAttribution {
   status: TriggerStatus;
   buildId?: string;
-  /** How the id was obtained. A baseline difference is weaker than a returned id. */
+  /** Source of the buildId. A baseline difference is only reconciliation evidence. */
   source: "trigger-result" | "baseline-difference" | "none";
-  /** null means the delegate did not prove whether request bytes were sent. */
+  /** null means dispatch is unknown. A positive report is delegated evidence. */
   dispatched: boolean | null;
   isDraft?: boolean;
   createdDraftEnvironment?: boolean;
@@ -951,15 +951,9 @@ export interface TriggerAttribution {
 /**
  * Decide which Build, if any, a dispatched trigger produced.
  *
- * The order matters. Identity is checked before attribution, because a Build in
- * the wrong environment must never be adopted; and "did not dispatch" is
- * separated from "dispatched, outcome unknown", because only the first is safe
- * to retry.
- *
- * When the trigger result carried no id, the candidates are the rows absent from
- * the pre-trigger baseline. Exactly one may be adopted. Zero is
- * `NOT_ACCEPTED_UNKNOWN`; two or more voids attribution. Never by recency, and
- * never preferring a non-`SKIPPED` row.
+ * Check identity before attribution. An exact trigger result identifies the
+ * build the delegate reported. Without an id, new rows are candidates only.
+ * A delegate's claim that it stopped cannot establish that a retry is safe.
  */
 export function attributeTriggeredBuild(args: {
   declaredEnvironmentPublicId: string;
@@ -974,7 +968,7 @@ export function attributeTriggeredBuild(args: {
   const rowReadback =
     "a list-environment-builds row for the adopted buildId, matched client-side on the exact id";
   const base = {
-    dispatched: args.dispatched ?? null,
+    dispatched: args.dispatched === true && !args.precondition ? true : null,
     trust: DELEGATED_TRUST,
     requiredReadback: rowReadback,
   };
@@ -999,75 +993,22 @@ export function attributeTriggeredBuild(args: {
     };
   }
 
-  if (args.precondition !== undefined && args.precondition !== "") {
-    if (args.dispatched !== false || args.trigger !== undefined) {
-      return {
-        ...base,
-        status: "NOT_ACCEPTED_UNKNOWN",
-        source: "none",
-        reason:
-          "The delegated report claimed a pre-trigger stop but did not prove that no trigger " +
-          "was dispatched. The write outcome is unknown.",
-        nextSteps: [
-          "Read the Build list and reconcile exact identifiers before acting.",
-          NEVER_RETRIGGER,
-        ],
-      };
-    }
-    return {
-      ...base,
-      status: "PRECONDITION_UNMET",
-      source: "none",
-      dispatched: false,
-      reason:
-        `The delegated run stopped before triggering: ${args.precondition}. A non-terminal ` +
-        "baseline row, or another active run against the environment, removes the exclusivity " +
-        "attribution depends on.",
-      nextSteps: [
-        "Wait for the environment's in-flight Build and other runs to finish, then trigger once.",
-      ],
-    };
-  }
-
-  if (args.dispatched === undefined) {
+  if (args.precondition || args.dispatched !== true) {
+    const reported = args.precondition
+      ? `The delegate reported a pre-trigger stop: ${args.precondition}.`
+      : args.dispatched === false
+        ? "The delegate reported no dispatch."
+        : "The delegate omitted its dispatch status.";
+    const candidate = args.trigger?.buildId;
     return {
       ...base,
       status: "NOT_ACCEPTED_UNKNOWN",
       source: "none",
-      reason:
-        "The delegated report omitted triggerDispatched, so it did not prove whether request " +
-        "bytes reached Cursor. The write outcome is unknown.",
+      ...(candidate ? { candidates: [candidate] } : {}),
+      reason: `${reported} The write outcome is unknown.`,
       nextSteps: [
         "Read the Build list and reconcile exact identifiers before acting.",
         NEVER_RETRIGGER,
-      ],
-    };
-  }
-
-  if (args.dispatched === false) {
-    if (args.trigger !== undefined) {
-      return {
-        ...base,
-        status: "NOT_ACCEPTED_UNKNOWN",
-        source: "none",
-        reason:
-          "The delegated report says no trigger was dispatched but also contains a trigger " +
-          "result. The write outcome is contradictory and unknown.",
-        nextSteps: [
-          "Read the Build list and reconcile exact identifiers before acting.",
-          NEVER_RETRIGGER,
-        ],
-      };
-    }
-    return {
-      ...base,
-      status: "NOT_DISPATCHED",
-      source: "none",
-      reason:
-        "No trigger was dispatched, so nothing was written. This is the one trigger state that " +
-        "is safe to retry.",
-      nextSteps: [
-        "It is safe to retry once because the report explicitly proves no request bytes reached Cursor.",
       ],
     };
   }
@@ -1092,6 +1033,18 @@ export function attributeTriggeredBuild(args: {
         nextSteps: ["Read the Build list and reconcile the returned id with the baseline before acting.", NEVER_RETRIGGER],
       };
     }
+    if (args.trigger?.isDraft === false ||
+        args.rows?.some(row => row.buildId === returnedId && row.isDraft === false)) {
+      return {
+        ...base,
+        ...draftFlags,
+        status: "ATTRIBUTION_AMBIGUOUS",
+        source: "none",
+        candidates: [returnedId],
+        reason: "The delegate reported a non-draft build for a draft-only trigger.",
+        nextSteps: ["Reconcile the exact buildId with cursor_get_build.", NEVER_RETRIGGER],
+      };
+    }
     return {
       ...base,
       ...draftFlags,
@@ -1099,7 +1052,7 @@ export function attributeTriggeredBuild(args: {
       buildId: returnedId,
       source: "trigger-result",
       reason:
-        "The trigger returned an exact buildId. Its status, source, and triggerType are absent " +
+        "The delegate reported an exact buildId from the trigger. Its status, source, and triggerType are absent " +
         "from that result and come only from a list readback.",
       nextSteps: [
         "Monitor that exact buildId to a terminal status.",
@@ -1120,50 +1073,6 @@ export function attributeTriggeredBuild(args: {
     .filter((row) => !baseline.has(row.buildId))
     .map((row) => row.buildId);
   const unique = [...new Set(candidates)];
-
-  if (
-    unique.length === 1 &&
-    args.otherActiveRuns !== 0
-  ) {
-    // Attribution by difference depends on this server's write being the only
-    // one in the window. Another active run removes that, so the single new row
-    // cannot be claimed as ours.
-    return {
-      ...base,
-      ...draftFlags,
-      status: "ATTRIBUTION_AMBIGUOUS",
-      source: "none",
-      candidates: unique,
-      reason:
-        args.otherActiveRuns === undefined
-          ? "One row was absent from the pre-trigger baseline, but the delegate did not attest whether another run was active, so that row cannot be attributed to this trigger."
-          : !Number.isInteger(args.otherActiveRuns) || args.otherActiveRuns < 0
-            ? "The active-run count is invalid, so exclusivity was not established and the new row cannot be attributed to this trigger."
-            : `One row was absent from the pre-trigger baseline, but ${args.otherActiveRuns} other run(s) ` +
-              "were active against this environment, so that row cannot be attributed to this trigger.",
-      nextSteps: [
-        "Identify the Build from its own identifiers before acting on it.",
-        NEVER_RETRIGGER,
-      ],
-    };
-  }
-
-  if (unique.length === 1) {
-    return {
-      ...base,
-      ...draftFlags,
-      status: "ADOPTED",
-      buildId: unique[0]!,
-      source: "baseline-difference",
-      reason:
-        "The trigger result carried no buildId, and exactly one row was absent from the " +
-        "pre-trigger baseline, so that row is the Build.",
-      nextSteps: [
-        "Monitor that exact buildId to a terminal status.",
-        "Re-read the baseline before any further trigger; a new Build is prepended to page 1.",
-      ],
-    };
-  }
 
   if (unique.length === 0) {
     return {
@@ -1187,9 +1096,8 @@ export function attributeTriggeredBuild(args: {
     status: "ATTRIBUTION_AMBIGUOUS",
     source: "none",
     candidates: unique,
-    reason:
-      `${unique.length} rows were absent from the pre-trigger baseline, so attribution is void. ` +
-      "Adopting by recency, or preferring a non-SKIPPED row, can pin the wrong Build.",
+    reason: "The delegate reported no trigger buildId. Rows absent from the baseline are candidates " +
+      "for reconciliation, even when no other agent runs were active.",
     nextSteps: [
       "Identify the Build from its own identifiers before acting on it.",
       NEVER_RETRIGGER,

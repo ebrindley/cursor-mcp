@@ -170,15 +170,14 @@ There is no safe trigger retry.
 | Build cancel | Not applicable; no operation exists. |
 | Run cancel | Never, for any Build purpose. |
 
-Attribution when a trigger result carries no `buildId`: take the rows absent
-from the pre-trigger baseline within the dispatch window. Exactly one candidate
-may be adopted. Zero candidates is `NOT_ACCEPTED_UNKNOWN`; two or more voids
-attribution. **Never attribute by recency, and never prefer a non-`SKIPPED`
-row** — both can pin the wrong Build. Unknown write outcomes fail closed and
-never trigger a second Build.
+When the trigger result carries no `buildId`, rows absent from the pre-trigger
+baseline are reconciliation candidates. Even a single new row can come from
+another request. An empty list or a delegate's report that it skipped dispatch
+leaves the write outcome unknown. Reconcile against the environment's build
+history before considering another trigger.
 
-A non-terminal baseline row, or another active run against the environment,
-removes the exclusivity attribution depends on. Verify both before triggering.
+The delegate checks for nonterminal baseline rows and active agent runs before
+triggering to avoid known concurrent work.
 
 A `SKIPPED` result on an agent-requested trigger is an informative terminal
 close that consumes the budget, not a licence to re-trigger.

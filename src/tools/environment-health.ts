@@ -516,7 +516,7 @@ export function registerEnvironmentHealthTools(
           : attribution.status;
       const refreshExecution = {
         ...assessment.refresh,
-        dispatched: attribution.dispatched === true,
+        dispatched: attribution.dispatched,
         priorActiveBuild: "unverified",
       };
 
@@ -524,8 +524,9 @@ export function registerEnvironmentHealthTools(
         source: `delegated run ${collected.delegation.runId}`,
         text: [
           `${refreshStatus}  build=${attribution.buildId ?? "(none adopted)"}  dispatched=${attribution.dispatched}`,
-          `refreshed for toolchain drift: ${assessment.toolchain.driftedNames.join(", ")}`,
+          `toolchain drift: ${assessment.toolchain.driftedNames.join(", ")}`,
           attribution.reason,
+          ...(attribution.status === "ADOPTED" ? [] : attribution.nextSteps),
           ...(monitor === undefined ? [] : [`${monitor.status}: ${monitor.reason}`]),
           ...(monitoredBuild === undefined ? [] : [buildLine(monitoredBuild)]),
           ...(draftVerified
