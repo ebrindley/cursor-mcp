@@ -40,9 +40,13 @@ function updatedArgs(old) {
   if (old.length === 0) return [entry];
   throw new Error('Cannot identify existing Cursor MCP entry point; registration retained');
 }
+function directPackageBin(command, args) {
+  return typeof command === 'string' && path.basename(command) === 'cursor-mcp' &&
+    (args === undefined || Array.isArray(args) && args.length === 0);
+}
 function updatedCommand(old, args) {
-  // Keep custom launchers and the user's Node choice. Only package-runner
-  // registrations need conversion to Node when migrating to a source install.
+  if (directPackageBin(old, args)) return options.node;
+  // Keep custom launchers and the user's Node choice.
   return old === undefined || typeof old === 'string' && path.basename(old) === 'npx' && args?.includes('@ebrindley/cursor-mcp') ? options.node : old;
 }
 function jsonConfig(text, allow) {
@@ -138,19 +142,25 @@ function tomlConfig(text, allow, host) {
     seen.add(name);
     const raw = text.slice(start, stop).trim();
     const value = name === 'command' ? stringArray('[' + raw + ']')[0] : stringArray(raw);
-    edits.push({ key: name, start, stop, value });
+    edits.push({ key: name, lineStart: match.index, start, stop, value });
   }
   if (!found) {
     if (!allow) return null;
     if (unsupported) throw new Error('Unsupported inline/dotted MCP config layout; registration retained');
     return `${text}${text.endsWith('\n') || !text ? '' : '\n'}\n[mcp_servers.cursor]\ncommand = ${JSON.stringify(options.node)}\nargs = ${JSON.stringify([entry])}\n${host === 'codex' ? 'env_vars = ["CURSOR_API_KEY", "PATH", "HOME"]\n' : ''}`;
   }
-  if (!seen.has('command') || !seen.has('args')) throw new Error('Unsupported TOML command layout; registration retained');
-  const args = edits.find(edit => edit.key === 'args').value;
+  const command = edits.find(edit => edit.key === 'command');
+  const args = edits.find(edit => edit.key === 'args')?.value;
+  if (!command || (args === undefined && !directPackageBin(command.value, args))) {
+    throw new Error('Unsupported TOML command layout; registration retained');
+  }
   let changed = text;
   for (const edit of edits.reverse()) {
     const value = edit.key === 'command' ? updatedCommand(edit.value, args) : updatedArgs(args);
     if (JSON.stringify(value) !== JSON.stringify(edit.value)) changed = changed.slice(0, edit.start) + JSON.stringify(value) + changed.slice(edit.stop);
+  }
+  if (args === undefined) {
+    changed = changed.slice(0, command.lineStart) + 'args = ' + JSON.stringify([entry]) + '\n' + changed.slice(command.lineStart);
   }
   return changed;
 }

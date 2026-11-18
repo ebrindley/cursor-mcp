@@ -95,6 +95,36 @@ test('pin migration preserves JSON settings and TOML comments, env and policy su
   }
 });
 
+test('unattended update migrates direct executables with omitted or empty arguments', t => {
+  const f = fixture(t);
+  f.ok('install', '--yes', '--host', 'claude');
+  const entry = path.join(f.root, 'current/dist/bin.js');
+  const direct = '/usr/local/bin/cursor-mcp';
+  for (const [file, spec] of [
+    ['.claude.json', { command: 'cursor-mcp' }],
+    ['.cursor/mcp.json', { command: direct, args: [] }],
+  ]) {
+    fs.mkdirSync(path.dirname(path.join(f.home, file)), { recursive: true });
+    fs.writeFileSync(path.join(f.home, file), JSON.stringify({ mcpServers: { cursor: spec } }));
+  }
+  for (const [file, args] of [['.codex/config.toml', ''], ['.grok/config.toml', 'args = []\n']]) {
+    fs.mkdirSync(path.dirname(path.join(f.home, file)), { recursive: true });
+    fs.writeFileSync(path.join(f.home, file), '[mcp_servers.cursor]\ncommand = "cursor-mcp" # launcher\n' + args);
+  }
+  f.commit('update');
+  f.ok('update', '--unattended');
+  for (const file of ['.claude.json', '.cursor/mcp.json']) {
+    const spec = JSON.parse(f.read(path.join(f.home, file))).mcpServers.cursor;
+    assert.equal(path.basename(spec.command), 'node');
+    assert.deepEqual(spec.args, [entry]);
+  }
+  for (const file of ['.codex/config.toml', '.grok/config.toml']) {
+    const text = f.read(path.join(f.home, file));
+    assert.match(text, /^command = ".*\/node"\s*# launcher$/m);
+    assert.ok(text.includes('args = ' + JSON.stringify([entry])));
+  }
+});
+
 test('explicit client selection persists through updates; reinstall detects newly available clients', t => {
   const f = fixture(t);
   f.ok('install', '--yes', '--host', 'claude');
