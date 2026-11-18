@@ -101,6 +101,8 @@ node dist/bin.js doctor --policy /absolute/path/policy.json
 Pass the same path as `CURSOR_MCP_POLICY` to the MCP server through your client's
 environment configuration. For Codex, export its value before starting Codex and
 add `"CURSOR_MCP_POLICY"` to the `env_vars` list above.
+When `CURSOR_MCP_POLICY` is set for the source installer, it records the resolved
+path in new Codex and Cursor registrations.
 
 The [quickstart policy](../policy.quickstart.json) grants 14 everyday tools:
 account and repository discovery, agent/run reads, usage, artifacts, launch,

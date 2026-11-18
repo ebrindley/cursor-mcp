@@ -19,6 +19,7 @@ for (let i = 2; i < process.argv.length; i++) {
 if (!options.root || !options.node) throw new Error('Missing installation paths');
 const home = process.env.HOME || os.homedir();
 const entry = path.join(options.root, 'current/dist/bin.js');
+const policyPath = process.env.CURSOR_MCP_POLICY ? path.resolve(process.env.CURSOR_MCP_POLICY) : undefined;
 const configs = {
   claude: process.env.CLAUDE_CONFIG_DIR ? path.join(process.env.CLAUDE_CONFIG_DIR, '.claude.json') : path.join(home, '.claude.json'),
   codex: path.join(process.env.CODEX_HOME || path.join(home, '.codex'), 'config.toml'),
@@ -147,7 +148,11 @@ function tomlConfig(text, allow, host) {
   if (!found) {
     if (!allow) return null;
     if (unsupported) throw new Error('Unsupported inline/dotted MCP config layout; registration retained');
-    return `${text}${text.endsWith('\n') || !text ? '' : '\n'}\n[mcp_servers.cursor]\ncommand = ${JSON.stringify(options.node)}\nargs = ${JSON.stringify([entry])}\n${host === 'codex' ? 'env_vars = ["CURSOR_API_KEY", "PATH", "HOME"]\n' : ''}`;
+    const environment = host === 'codex'
+      ? 'env_vars = ["CURSOR_API_KEY", "PATH", "HOME"]\n' +
+        (policyPath === undefined ? '' : `env = { CURSOR_MCP_POLICY = ${JSON.stringify(policyPath)} }\n`)
+      : '';
+    return `${text}${text.endsWith('\n') || !text ? '' : '\n'}\n[mcp_servers.cursor]\ncommand = ${JSON.stringify(options.node)}\nargs = ${JSON.stringify([entry])}\n${environment}`;
   }
   const command = edits.find(edit => edit.key === 'command');
   const args = edits.find(edit => edit.key === 'args')?.value;
@@ -187,6 +192,7 @@ try {
       if (host === 'cursor' && !result.old) {
         if (!process.env.CURSOR_API_KEY) throw new Error('New Cursor registration requires CURSOR_API_KEY; existing registrations are untouched');
         result.next.env = { CURSOR_API_KEY: process.env.CURSOR_API_KEY, PATH: process.env.PATH || '' };
+        if (policyPath !== undefined) result.next.env.CURSOR_MCP_POLICY = policyPath;
         const data = JSON.parse(result.text); data.mcpServers.cursor = result.next;
         result.text = `${JSON.stringify(data, null, 2)}\n`;
         console.log('Cursor opt-in stores CURSOR_API_KEY in its private MCP configuration.');

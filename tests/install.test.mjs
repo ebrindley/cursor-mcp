@@ -139,6 +139,25 @@ test('explicit client selection persists through updates; reinstall detects newl
   assert.equal(f.read(path.join(f.dir, 'npm-calls')), builds);
 });
 
+test('fresh Codex and Cursor registrations retain the explicitly selected policy', t => {
+  const f = fixture(t);
+  const policy = path.join(f.dir, 'custom policy.json');
+  f.env.CURSOR_MCP_POLICY = path.relative(process.cwd(), policy);
+  f.ok('install', '--yes', '--host', 'codex', '--with-cursor');
+
+  const codex = path.join(f.home, '.codex/config.toml');
+  const cursor = path.join(f.home, '.cursor/mcp.json');
+  const codexConfig = f.read(codex);
+  const cursorConfig = f.read(cursor);
+  assert.ok(codexConfig.includes('env = { CURSOR_MCP_POLICY = ' + JSON.stringify(policy) + ' }'));
+  assert.equal(JSON.parse(cursorConfig).mcpServers.cursor.env.CURSOR_MCP_POLICY, policy);
+
+  f.env.CURSOR_MCP_POLICY = path.join(f.dir, 'different.json');
+  f.ok('install', '--yes', '--host', 'codex', '--with-cursor');
+  assert.equal(f.read(codex), codexConfig);
+  assert.equal(f.read(cursor), cursorConfig);
+});
+
 test('failed verification retains prior release and quarantines that commit', t => {
   const f = fixture(t);
   f.ok('install', '--yes', '--host', 'claude');
