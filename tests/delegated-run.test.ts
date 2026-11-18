@@ -212,6 +212,17 @@ describe("launching a delegate", () => {
     ).rejects.toBeInstanceOf(PolicyError);
   });
 
+  it("refuses a draft Build that contradicts a pinned environment before launch", async () => {
+    const p = policy({});
+    p.profiles.p!.environments = [{ name: ENV_NAME, publicId: "pinned-env", scope: "team" }];
+    const { calls, fetchImpl } = stub({});
+    await expect(runner(p, fetchImpl).start({
+      environment: ENV_NAME,
+      request: { mission: "trigger-build", environmentPublicId: "stale-env" },
+    })).rejects.toThrow(/pinned to environmentPublicId/);
+    expect(calls).toEqual([]);
+  });
+
   it("refuses to delegate under a profile that pins autoCreatePR true", async () => {
     const { fetchImpl } = stub({});
     await expect(

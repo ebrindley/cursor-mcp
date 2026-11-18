@@ -41,7 +41,7 @@ import { REPORT_CLOSE, REPORT_OPEN, type QualificationExpectations } from "./env
 import { log } from "./log.js";
 import { independently, requestScope, withWaitScope } from "./request-context.js";
 import { createWaitScope, WaitStoppedError, within, sleep as boundedSleep, delay } from "./wait.js";
-import { resolveAutoCreatePR, resolveCreateAgentLaunch, resolveModel } from "./policy.js";
+import { assertEnvironmentIdentity, resolveAutoCreatePR, resolveCreateAgentLaunch, resolveModel } from "./policy.js";
 import {
   cancelRejectedRun,
   rejectedRunCleanupMessage,
@@ -555,6 +555,9 @@ export class CursorDelegatedRunner implements DelegatedRunner {
       throw new PolicyError("a delegated run must target a named environment");
     }
     const request = normalizeMissionRequest(args.request);
+    if (request.mission === "trigger-build" && request.environmentPublicId !== undefined) {
+      assertEnvironmentIdentity(this.#profile, launch.name, request.environmentPublicId);
+    }
     // Requested false explicitly: a profile pinning autoCreatePR true refuses
     // delegation rather than letting a probe open pull requests.
     const autoCreatePR = resolveAutoCreatePR(this.#profile, false);
