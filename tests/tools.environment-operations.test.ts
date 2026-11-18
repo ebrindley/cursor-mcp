@@ -22,6 +22,7 @@ import type {
   MissionRequest,
 } from "../src/delegated-run.js";
 import { REPORT_CLOSE, REPORT_OPEN } from "../src/environment-operations.js";
+import { CursorApiError } from "../src/errors.js";
 import { registerEnvironmentOperationTools } from "../src/tools/environment-operations.js";
 
 const ENV_NAME = "example-environment";
@@ -301,7 +302,31 @@ describe("delegation lifecycle", () => {
     expect(result.structured.status).toBe("DELEGATION_PENDING");
     expect(result.structured.resume).toEqual({ agentId: "bc-1", runId: "run-1" });
     expect(starts).toHaveLength(1);
-    expect(result.text).toContain("resume=");
+    expect(result.text).toContain('resume={"agentId":"bc-1","runId":"run-1"}');
+  });
+
+  it("resumes the same delegate from text after its first status read fails", async () => {
+    let polls = 0;
+    const { runner, starts } = fake(handle => {
+      if (++polls === 1) throw new CursorApiError(503, "temporarily unavailable");
+      return { state: "complete", handle, runStatus: "FINISHED",
+        text: [REPORT_OPEN, JSON.stringify({ mission: "inspect", environmentInfo }), REPORT_CLOSE].join("\n") };
+    });
+    const args = { environment: ENV_NAME, environmentPublicId: ENV_ID };
+    const first = await invoke(WRITE, runner, "cursor_inspect_environment", args);
+    expect(first.structured.status).toBe("DELEGATION_PENDING");
+    const resume = JSON.parse(first.text.match(/resume=(\{[^}]+\})/)![1]!);
+    expect(resume).toEqual(first.structured.resume);
+    const finished = await invoke(WRITE, runner, "cursor_inspect_environment", { ...args, resume });
+    expect(finished.structured.status).toBe("INSPECTED");
+    expect(starts).toHaveLength(1);
+  });
+
+  it("keeps a forbidden first status read as an error", async () => {
+    const { runner } = fake(() => { throw new CursorApiError(403, "access denied"); });
+    const result = await invoke(WRITE, runner, "cursor_inspect_environment", { environment: ENV_NAME });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("access denied");
   });
 
   it("launches nothing when resuming an existing delegation", async () => {

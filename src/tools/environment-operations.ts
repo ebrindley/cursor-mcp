@@ -30,7 +30,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { AgentScope } from "../agent-scope.js";
-import type { CursorClient } from "../client.js";
+import { CursorCancelledError, type CursorClient } from "../client.js";
+import { USAGE_LIMITED_CLASS } from "../api-errors.js";
 import type { Policy } from "../config.js";
 import { activeProfile } from "../config.js";
 import { cursorCliRunner, type CliRunner } from "../cursor-cli.js";
@@ -42,6 +43,7 @@ import {
   MAX_PAGE_LIMIT,
   MAX_WAIT_MS,
   normalizeMissionRequest,
+  type DelegatedOutcome,
   type DelegatedRunner,
   type DelegationHandle,
   type MissionName,
@@ -78,7 +80,7 @@ import {
   type MonitorResult,
   type SaveCandidateRow,
 } from "../environment-operations.js";
-import { PolicyError } from "../errors.js";
+import { CursorApiError, CursorTransportError, PolicyError } from "../errors.js";
 import { CapabilityError } from "../lifecycle-model.js";
 import { resolveEnvironmentBinding } from "../policy.js";
 import { MeSchema } from "../schemas.js";
@@ -287,7 +289,7 @@ export const EVIDENCE = {
 /* ----------------------------------------------------------------- delegation */
 
 export type Collected =
-  | { kind: "pending"; delegation: DelegationOut }
+  | { kind: "pending"; delegation: DelegationOut; observationFailed?: boolean }
   | { kind: "failed"; delegation: DelegationOut; reason: string }
   | { kind: "report"; delegation: DelegationOut; report: DelegatedReport };
 
@@ -382,10 +384,16 @@ export async function collectMission(args: {
   if (args.resume === undefined && (args.waitMs ?? 0) === 0) {
     return { kind: "pending", delegation: { ...handle } };
   }
-  const outcome = await args.runner.collect({
-    handle,
-    waitMs: args.waitMs ?? 0,
-  });
+  let outcome: DelegatedOutcome;
+  try {
+    outcome = await args.runner.collect({ handle, waitMs: args.waitMs ?? 0 });
+  } catch (error) {
+    const transient = error instanceof CursorApiError
+      ? error.status >= 500 || (error.status === 429 && error.classification !== USAGE_LIMITED_CLASS)
+      : error instanceof CursorTransportError && !(error instanceof CursorCancelledError);
+    if (args.resume !== undefined || !transient) throw error;
+    return { kind: "pending", delegation: { ...handle }, observationFailed: true };
+  }
   if (outcome.state !== "pending") bindings.delete(bindingKey);
   const delegation: DelegationOut = {
     agentId: handle.agentId,
@@ -481,16 +489,18 @@ export function delegationResult(
 ): ReturnType<typeof ok> {
   const delegation = collected.delegation;
   if (collected.kind === "pending") {
+    const resume = { agentId: delegation.agentId, runId: delegation.runId };
     return ok({
       source: `delegated run ${delegation.runId}`,
       text: [
         `delegation pending  run=${delegation.runId}  status=${delegation.runStatus ?? "(unknown)"}`,
-        "Call the same tool again with resume={agentId, runId} to read the report.",
+        ...(collected.observationFailed ? ["The status read failed. The run may still be active."] : []),
+        `Call the same tool again with resume=${JSON.stringify(resume)} to read the report.`,
       ].join("\n"),
       structured: {
         status: "DELEGATION_PENDING",
+        resume,
         delegation: { ...delegation },
-        resume: { agentId: delegation.agentId, runId: delegation.runId },
       },
       policy,
     });
