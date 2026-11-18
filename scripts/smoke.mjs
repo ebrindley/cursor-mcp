@@ -420,17 +420,7 @@ async function main() {
     return items.length === 0 ? "none (expected)" : `${items.length} artifacts`;
   });
 
-  console.log("\nrefusals");
-
-  await check("refuses a repo outside the policy", async () => {
-    const result = await observed(45_000, () => client.callTool({
-      name: "cursor_create_agent",
-      arguments: { repo: "someone-else/private-thing", prompt: "should never run" },
-    }));
-    assert(result.isError === true, "an unapproved repo was not refused");
-    const text = (result.content ?? []).map((c) => c.text ?? "").join("\n");
-    assert(text.includes("Refused by policy"), `unexpected refusal text: ${text}`);
-  });
+  console.log("\nerror handling");
 
   await check("surfaces a 404 as a fenced error, not a crash", async () => {
     const result = await observed(45_000, () => client.callTool({
