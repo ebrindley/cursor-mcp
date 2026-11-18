@@ -712,10 +712,36 @@ describe("rollback", () => {
     expect(result.residual?.supersededBuildId).toBe("bld-new");
     expect(result.residual?.environmentVersionPublicId).toBeUndefined();
     expect(result.rollbackTarget).toMatchObject({
-      buildId: "bld-new",
+      buildId: "bld-prev",
       provenance: "caller-supplied",
       provenActive: false,
     });
+  });
+
+  it.each(["SUCCEEDED", "FAILED"])("gives rollback preview instructions only for an eligible %s row", (status) => {
+    const result = planEnvironmentLifecycle(lifecycle({
+      intent: "rollback",
+      buildId: "bld-prev",
+      supersededBuildId: "bld-new",
+      observed: {
+        buildId: "bld-prev",
+        status,
+        isDraft: false,
+        environmentPublicId: ENV,
+        environmentPublicIdSource: "row",
+        observedAtMs: 1_000,
+      },
+    }), () => 1_001);
+
+    expect(result.rollbackTarget.buildId).toBe("bld-prev");
+    if (status === "SUCCEEDED") {
+      expect(result.residual).toMatchObject({ buildId: "bld-prev", supersededBuildId: "bld-new" });
+      expect(result.manualActions).not.toHaveLength(0);
+    } else {
+      expect(statusOf(result.steps, "rollback")).toEqual(["failed"]);
+      expect(result.residual).toBeUndefined();
+      expect(result.manualActions).toEqual([]);
+    }
   });
 });
 

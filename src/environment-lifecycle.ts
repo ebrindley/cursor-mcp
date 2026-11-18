@@ -561,12 +561,17 @@ export function planEnvironmentLifecycle(
     });
     const buildId = request.buildId;
     const supersededBuildId = request.supersededBuildId;
-    if (
-      buildId === undefined ||
-      buildId === "" ||
-      supersededBuildId === undefined ||
-      request.observed === undefined
-    ) {
+    const eligibility = buildId && supersededBuildId !== undefined && request.observed !== undefined
+      ? promotionEligibility({
+          operation: "rollback",
+          declaredEnvironmentPublicId: request.environmentPublicId,
+          requestedBuildId: buildId,
+          build: request.observed,
+          supersededBuildId,
+          nowMs: now(),
+        })
+      : undefined;
+    if (buildId === undefined || !eligibility?.eligible) {
       const at = now();
       steps.push({
         step: "rollback",
@@ -574,7 +579,7 @@ export function planEnvironmentLifecycle(
         startedAtMs: at,
         endedAtMs: at,
         durationMs: 0,
-        reason:
+        reason: eligibility?.reason ??
           "Rollback requires the exact prior buildId, the superseded buildId, and the observed row.",
       });
     } else {
@@ -1653,9 +1658,10 @@ function finishPlan(args: {
 }
 
 function plannedRollbackTarget(request: LifecycleRequest): RollbackTarget {
-  if (request.supersededBuildId !== undefined) {
+  const buildId = request.intent === "rollback" ? request.buildId : request.supersededBuildId;
+  if (buildId) {
     return {
-      buildId: request.supersededBuildId,
+      buildId,
       provenance: "caller-supplied",
       provenActive: false,
       reason: UNREADABLE_ACTIVE,
